@@ -1,8 +1,8 @@
 # YouQuality
 
-View and change video quality in YouTube app from the video overlay.
+Views and changes video quality in YouTube app from the video overlay.
 
-Use with YTClassicVideoQuality to get the video quality list instantly.
+Use with [YTClassicVideoQuality](https://github.com/PoomSmart/YTClassicVideoQuality) to get the video quality list instantly.
 
 ## Prerequisites
 
