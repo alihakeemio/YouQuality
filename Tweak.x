@@ -11,6 +11,9 @@
 // ─── Gain state ───────────────────────────────────────────────────────────────
 static float currentGain = 1.0f;
 
+// Weak reference to the active audio renderer so we can apply gain immediately
+static __weak HAMSBARAudioTrackRenderer *activeRenderer = nil;
+
 static float loadGain() {
     float g = [[NSUserDefaults standardUserDefaults] floatForKey:GainKey];
     if (g < 1.0f) g = 1.0f;
@@ -18,11 +21,25 @@ static float loadGain() {
     return g;
 }
 
-static void saveGain(float gain) {
+static void applyGainToRenderer(HAMSBARAudioTrackRenderer *renderer) {
+    if (!renderer) return;
+    Ivar ivar = class_getInstanceVariable([renderer class], "_renderer");
+    if (!ivar) return;
+    id r = object_getIvar(renderer, ivar);
+    if (!r) return;
+    AVSampleBufferAudioRenderer *audioRenderer = (AVSampleBufferAudioRenderer *)r;
+    // Re-read the base volume from the renderer's own volume property
+    // then multiply by gain so we don't stack gains on repeated calls
+    audioRenderer.volume = renderer.volume * currentGain;
+}
+
+static void saveGainAndApply(float gain) {
     if (gain < 1.0f) gain = 1.0f;
     if (gain > 4.0f) gain = 4.0f;
     currentGain = gain;
     [[NSUserDefaults standardUserDefaults] setFloat:gain forKey:GainKey];
+    // Apply immediately to the live renderer without needing seek/play
+    applyGainToRenderer(activeRenderer);
 }
 
 // Tap cycles: 100 -> 150 -> 200 -> 250 -> 300 -> 350 -> 400 -> 100
@@ -30,7 +47,7 @@ static float nextGain(float gain) {
     static const float steps[] = {1.0f, 1.5f, 2.0f, 2.5f, 3.0f, 3.5f, 4.0f};
     for (int i = 0; i < 7; i++)
         if (gain < steps[i] - 0.01f) return steps[i];
-    return 1.0f; // wrap back to 100%
+    return 1.0f;
 }
 
 static NSString *gainLabel() {
@@ -39,8 +56,6 @@ static NSString *gainLabel() {
 }
 
 // ─── HAMSBARAudioTrackRenderer interface ─────────────────────────────────────
-// Confirmed via Frida: _renderer ivar holds AVSampleBufferAudioRenderer
-// updateGainAndRendererVolume pushes final volume to _renderer after normalization
 @interface HAMSBARAudioTrackRenderer : NSObject
 @property (nonatomic, assign) float volume;
 - (void)updateGainAndRendererVolume;
@@ -75,18 +90,15 @@ static void setQualityButtonStyle(YTQTMButton *button) {
 static void updateVolBoostButtonLabel(YTQTMButton *button) {
     if (!button) return;
     button.titleLabel.numberOfLines = 2;
-    // Mic icon + current gain percentage
     [button setTitle:[NSString stringWithFormat:@"🎙\n%@", gainLabel()]
             forState:UIControlStateNormal];
 }
 
 static void attachLongPress(YTQTMButton *button, id target) {
     if (!button) return;
-    // Remove any existing long press recognizers to avoid duplicates
-    for (UIGestureRecognizer *gr in button.gestureRecognizers) {
+    for (UIGestureRecognizer *gr in button.gestureRecognizers)
         if ([gr isKindOfClass:[UILongPressGestureRecognizer class]])
             [button removeGestureRecognizer:gr];
-    }
     UILongPressGestureRecognizer *lp = [[UILongPressGestureRecognizer alloc]
         initWithTarget:target action:@selector(handleVolBoostLongPress:)];
     lp.minimumPressDuration = 0.6;
@@ -94,28 +106,16 @@ static void attachLongPress(YTQTMButton *button, id target) {
 }
 
 // ─── Audio hook ───────────────────────────────────────────────────────────────
-// Confirmed via Frida session:
-//   HAMSBARAudioTrackRenderer._renderer = AVSampleBufferAudioRenderer
-//   updateGainAndRendererVolume() pushes loudness-normalized volume to _renderer
-//   After %orig, _renderer.volume = normalized value (e.g. 0.447 at 50% system vol)
-//   AVSampleBufferAudioRenderer.volume accepts > 1.0 for true amplification
-//   Multiplying by currentGain after %orig applies boost on top of normalization
 %group Audio
 
 %hook HAMSBARAudioTrackRenderer
 
 - (void)updateGainAndRendererVolume {
     %orig;
+    // Track the active renderer instance for live gain application
+    activeRenderer = self;
     if (currentGain <= 1.0f) return;
-
-    Ivar ivar = class_getInstanceVariable([self class], "_renderer");
-    if (!ivar) return;
-
-    id renderer = object_getIvar(self, ivar);
-    if (!renderer) return;
-
-    AVSampleBufferAudioRenderer *r = (AVSampleBufferAudioRenderer *)renderer;
-    r.volume = r.volume * currentGain;
+    applyGainToRenderer(self);
 }
 
 %end
@@ -206,14 +206,14 @@ NSString *getCompactQualityLabel(MLFormat *format) {
 
 %new(v@:@)
 - (void)didPressVolBoost:(id)arg {
-    saveGain(nextGain(currentGain));
+    saveGainAndApply(nextGain(currentGain));
     [self updateVolBoostButton];
 }
 
 %new(v@:@)
 - (void)handleVolBoostLongPress:(UILongPressGestureRecognizer *)gr {
     if (gr.state != UIGestureRecognizerStateBegan) return;
-    saveGain(1.0f);
+    saveGainAndApply(1.0f);
     [self updateVolBoostButton];
 }
 
@@ -260,14 +260,14 @@ NSString *getCompactQualityLabel(MLFormat *format) {
 
 %new(v@:@)
 - (void)didPressVolBoost:(id)arg {
-    saveGain(nextGain(currentGain));
+    saveGainAndApply(nextGain(currentGain));
     [self updateVolBoostButton];
 }
 
 %new(v@:@)
 - (void)handleVolBoostLongPress:(UILongPressGestureRecognizer *)gr {
     if (gr.state != UIGestureRecognizerStateBegan) return;
-    saveGain(1.0f);
+    saveGainAndApply(1.0f);
     [self updateVolBoostButton];
 }
 
