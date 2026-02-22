@@ -69,17 +69,33 @@ static void addLongPress(YTQTMButton *button, id target) {
     [button addGestureRecognizer:lp];
 }
 
-// ─── HAMAudioEngine hook ──────────────────────────────────────────────────────
-// Confirmed from class-dump: HAMAudioEngine has float outputVolume property
-// and holds an AVAudioMixerNode internally. This is YouTube's master audio
-// engine — hooking setOutputVolume: here affects all playback output.
-// Values above 1.0 are passed through to the underlying AVAudioMixerNode
-// which accepts them natively for true amplification above 100%.
+// ─── Audio boost hooks ────────────────────────────────────────────────────────
+// Strategy: hook at two levels for maximum coverage.
+//
+// 1) AVAudioMixerNode.outputVolume  — Apple framework class; this is the real
+//    signal-level gain knob that HAMAudioEngine feeds all audio through.
+//    Accepts values > 1.0 natively for true amplification.
+//
+// 2) HAMAudioEngineTrackRenderer.setVolume:  — per-track volume that YouTube
+//    sets independently of the mixer. Multiplying here ensures gain is applied
+//    even when only the track volume is updated (e.g. after seek/resume).
+//
+// HAMAudioEngine.setOutputVolume: is intentionally NOT hooked: that method
+// only writes to the _outputVolume ivar and does NOT propagate to the mixer
+// node, so hooking it has no audible effect.
 %group Audio
 
-%hook HAMAudioEngine
+%hook AVAudioMixerNode
 
 - (void)setOutputVolume:(float)volume {
+    %orig(volume * currentGain);
+}
+
+%end
+
+%hook HAMAudioEngineTrackRenderer
+
+- (void)setVolume:(float)volume {
     %orig(volume * currentGain);
 }
 
