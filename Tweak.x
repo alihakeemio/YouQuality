@@ -39,16 +39,7 @@ static void applyGain(float gain) {
     [p writeToFile:PREF_FILE atomically:YES];
 }
 
-// ─── AVAudioMixerNode hook ────────────────────────────────────────────────────
-// outputVolume accepts values above 1.0 and genuinely boosts audio output.
-// This is a plain ObjC %hook — no %hookf, no C function, no macro issues.
-%hook AVAudioMixerNode
 
-- (void)setOutputVolume:(float)volume {
-    %orig(volBoostEnabled() ? volume * currentGain : volume);
-}
-
-%end
 
 // ─── Forward declarations ─────────────────────────────────────────────────────
 @interface YTMainAppControlsOverlayView (YouQuality)
@@ -118,8 +109,18 @@ static void setButtonStyle(YTQTMButton *button) {
     [button setTitle:@"Auto" forState:UIControlStateNormal];
 }
 
-// ─── Video group (unchanged) ──────────────────────────────────────────────────
+// ─── Video group ─────────────────────────────────────────────────────────────
 %group Video
+
+// AVAudioMixerNode hook — inside a group so %init(Video) registers it.
+// outputVolume accepts values above 1.0, giving true boost beyond 100%.
+%hook AVAudioMixerNode
+
+- (void)setOutputVolume:(float)volume {
+    %orig(volBoostEnabled() ? volume * currentGain : volume);
+}
+
+%end
 
 NSString *getCompactQualityLabel(MLFormat *format) {
     NSString *qualityLabel = [format qualityLabel];
