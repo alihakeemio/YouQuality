@@ -1,7 +1,7 @@
 #import "../YTVideoOverlay/Header.h"
 #import "../YTVideoOverlay/Init.x"
 #import <YouTubeHeader/YTMainAppVideoPlayerOverlayViewController.h>
-#import <AudioToolbox/AudioToolbox.h>
+#import <AVFoundation/AVFoundation.h>
 
 #define TweakKey  @"YouQuality"
 #define PREF_FILE @"/var/mobile/Library/Preferences/com.ps.youquality.plist"
@@ -39,16 +39,16 @@ static void applyGain(float gain) {
     [p writeToFile:PREF_FILE atomically:YES];
 }
 
-// ─── AudioUnit C-function hook ────────────────────────────────────────────────
-// %hookf on AudioUnitSetParameter — the correct way to boost volume above 100%.
-// kMultiChannelMixerParam_Volume (== 0) on kAudioUnitScope_Input is YouTube's
-// audio bus. Accepts values above 1.0 natively, so 4.0 = 400% with no extra engine.
-%hookf(OSStatus, AudioUnitSetParameter, AudioUnit inUnit, AudioUnitParameterID inID, AudioUnitScope inScope, AudioUnitElement inElement, AudioUnitParameterValue inValue, UInt32 inBufferOffsetInFrames) {
-    if (volBoostEnabled() && inID == kMultiChannelMixerParam_Volume && inScope == kAudioUnitScope_Input) {
-        inValue *= currentGain;
-    }
-    return %orig(inUnit, inID, inScope, inElement, inValue, inBufferOffsetInFrames);
+// ─── AVAudioMixerNode hook ────────────────────────────────────────────────────
+// outputVolume accepts values above 1.0 and genuinely boosts audio output.
+// This is a plain ObjC %hook — no %hookf, no C function, no macro issues.
+%hook AVAudioMixerNode
+
+- (void)setOutputVolume:(float)volume {
+    %orig(volBoostEnabled() ? volume * currentGain : volume);
 }
+
+%end
 
 // ─── Forward declarations ─────────────────────────────────────────────────────
 @interface YTMainAppControlsOverlayView (YouQuality)
@@ -69,7 +69,7 @@ static void applyGain(float gain) {
 NSString *YouQualityUpdateNotification = @"YouQualityUpdateNotification";
 NSString *currentQualityLabel = @"N/A";
 
-// ─── Vol boost button helpers (plain C — safe outside %hook) ──────────────────
+// ─── Vol boost button helpers ─────────────────────────────────────────────────
 static const NSInteger kVolBoostTag = 0xB007;
 
 static YTQTMButton *makeVolBoostButton(id target) {
