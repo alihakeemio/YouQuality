@@ -10,7 +10,9 @@
 // ─── VOLUME BOOST STATE & EQ LOGIC ───────────────────────────────────────────
 
 static float currentGain = 1.0f;
-static NSMutableArray *gBoostEQNodes = nil;
+
+// Use a weak pointer array to prevent memory leaks when engines are destroyed
+static NSPointerArray *gBoostEQNodes = nil;
 
 static float linearGainTodB(float gain) {
     if (gain <= 1.0f) return 0.0f;
@@ -19,8 +21,11 @@ static float linearGainTodB(float gain) {
 
 static void updateAllEQGains() {
     float dB = linearGainTodB(currentGain);
-    for (AVAudioUnitEQ *eq in gBoostEQNodes) {
-        eq.globalGain = dB;
+    if (gBoostEQNodes) {
+        [gBoostEQNodes compact]; // Clean up deallocated nodes
+        for (AVAudioUnitEQ *eq in gBoostEQNodes) {
+            if (eq) eq.globalGain = dB;
+        }
     }
 }
 
@@ -86,48 +91,78 @@ static void addLongPress(YTQTMButton *button, id target) {
     [button addGestureRecognizer:lp];
 }
 
-// ─── AUDIO ENGINE EQ HOOK (THE REAL BOOST) ────────────────────────────────────
+
+// ─── AUDIO ENGINE & SBAR DISABLER (THE REAL FIX) ──────────────────────────────
 
 %group Audio
 
-// 1. Force YouTube to use AVAudioEngine instead of SBAR
-%hook YTColdConfig
-- (BOOL)mediaEngineClientEnableIosPassthroughRendering {
-    return NO;
-}
+// 1. Nuke Passthrough Rendering to force YouTube to use AVAudioEngine
+%hook YTIHamplayerColdConfig
+- (BOOL)mediaEngineClientEnableIosPassthroughRendering { return NO; }
 %end
 
-// 2. Inject EQ Node into the Audio Engine
+%hook MLHamplayerConfig
+- (BOOL)mediaEngineClientEnableIosPassthroughRendering { return NO; }
+%end
+
+%hook YTColdConfig
+- (BOOL)mediaEngineClientEnableIosPassthroughRendering { return NO; }
+%end
+
+
+// 2. Secretly intercept ANY node trying to connect to the Output Hardware
 %hook AVAudioEngine
 
-- (BOOL)startAndReturnError:(NSError **)error {
-    if (!gBoostEQNodes) gBoostEQNodes = [NSMutableArray new];
-    
-    BOOL alreadyInjected = NO;
-    for (AVAudioUnitEQ *eq in gBoostEQNodes) {
-        if (eq.engine == self) { alreadyInjected = YES; break; }
-    }
-
-    if (!alreadyInjected) {
-        AVAudioUnitEQ *eq = [[AVAudioUnitEQ alloc] initWithNumberOfBands:0];
-        eq.globalGain = linearGainTodB(currentGain);
-        eq.bypass = NO;
-
-        AVAudioMixerNode *mixer = self.mainMixerNode;
-        AVAudioOutputNode *output = self.outputNode;
+- (void)connect:(AVAudioNode *)node1 to:(AVAudioNode *)node2 format:(AVAudioFormat *)format {
+    if (node2 == self.outputNode) {
+        if (!gBoostEQNodes) gBoostEQNodes = [NSPointerArray weakObjectsPointerArray];
         
-        [self attachNode:eq];
-        [self disconnectNodeOutput:mixer];
-        [self connect:mixer to:eq format:nil];
-        [self connect:eq to:output format:nil];
-
-        [gBoostEQNodes addObject:eq];
+        AVAudioUnitEQ *eq = nil;
+        for (AVAudioUnitEQ *e in gBoostEQNodes) {
+            if (e.engine == self) { eq = e; break; }
+        }
+        
+        if (!eq) {
+            eq = [[AVAudioUnitEQ alloc] initWithNumberOfBands:0];
+            eq.globalGain = linearGainTodB(currentGain);
+            [self attachNode:eq];
+            [gBoostEQNodes addPointer:(__bridge void *)eq];
+        }
+        
+        // Rewire: Source Node -> Our EQ -> Hardware Output
+        %orig(node1, eq, format);
+        %orig(eq, node2, format);
+        return;
     }
+    %orig;
+}
 
-    return %orig;
+- (void)connect:(AVAudioNode *)node1 to:(AVAudioNode *)node2 fromBus:(AVAudioNodeBus)bus1 toBus:(AVAudioNodeBus)bus2 format:(AVAudioFormat *)format {
+    if (node2 == self.outputNode) {
+        if (!gBoostEQNodes) gBoostEQNodes = [NSPointerArray weakObjectsPointerArray];
+        
+        AVAudioUnitEQ *eq = nil;
+        for (AVAudioUnitEQ *e in gBoostEQNodes) {
+            if (e.engine == self) { eq = e; break; }
+        }
+        
+        if (!eq) {
+            eq = [[AVAudioUnitEQ alloc] initWithNumberOfBands:0];
+            eq.globalGain = linearGainTodB(currentGain);
+            [self attachNode:eq];
+            [gBoostEQNodes addPointer:(__bridge void *)eq];
+        }
+        
+        // Rewire explicitly via buses
+        %orig(node1, eq, bus1, 0, format);
+        %orig(eq, node2, 0, bus2, format);
+        return;
+    }
+    %orig;
 }
 %end
 %end
+
 
 // ─── QUALITY LABEL LOGIC ─────────────────────────────────────────────────────
 
