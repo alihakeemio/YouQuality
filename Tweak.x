@@ -6,7 +6,7 @@
 #define TweakKey  @"YouQuality"
 #define PREF_FILE @"/var/mobile/Library/Preferences/com.ps.youquality.plist"
 
-// ─── Prefs ────────────────────────────────────────────────────────────────────
+// ─── Volume booster prefs ─────────────────────────────────────────────────────
 static NSDictionary *prefs() {
     return [NSDictionary dictionaryWithContentsOfFile:PREF_FILE] ?: @{};
 }
@@ -39,12 +39,10 @@ static void applyGain(float gain) {
     [p writeToFile:PREF_FILE atomically:YES];
 }
 
-// ─── AudioUnit hook ───────────────────────────────────────────────────────────
-// %hookf hooks a plain C function (see hookf.md in Tweak-Tutorial).
-// AudioUnitSetParameter is what iOS uses internally to drive mixer volume.
-// kMultiChannelMixerParam_Volume (== 0) on kAudioUnitScope_Input is the bus
-// that carries YouTube's audio. Unlike AVPlayer.volume (hard-capped at 1.0),
-// AudioUnitSetParameter accepts values above 1.0 — so 4.0 = 400% works natively.
+// ─── AudioUnit hook (%hookf on a C function, per hookf.md) ───────────────────
+// AudioUnitSetParameter drives iOS mixer volume internally.
+// kMultiChannelMixerParam_Volume (== 0) on kAudioUnitScope_Input is YouTube's
+// audio bus. Accepts values above 1.0, so 4.0 = 400% with no extra engine needed.
 %hookf(OSStatus, AudioUnitSetParameter,
     AudioUnit               inUnit,
     AudioUnitParameterID    inID,
@@ -76,17 +74,12 @@ static void applyGain(float gain) {
 - (void)handleVolBoostLongPress:(UILongPressGestureRecognizer *)gr;
 @end
 
-// ─── Shared globals ───────────────────────────────────────────────────────────
+// ─── Original globals ─────────────────────────────────────────────────────────
 NSString *YouQualityUpdateNotification = @"YouQualityUpdateNotification";
 NSString *currentQualityLabel = @"N/A";
 
+// ─── Vol boost button helpers ─────────────────────────────────────────────────
 static const NSInteger kVolBoostTag = 0xB007;
-
-// ─── Button helpers ───────────────────────────────────────────────────────────
-static void setButtonStyle(YTQTMButton *button) {
-    button.titleLabel.numberOfLines = 3;
-    [button setTitle:@"Auto" forState:UIControlStateNormal];
-}
 
 static YTQTMButton *makeVolBoostButton(id target) {
     YTQTMButton *btn = [YTQTMButton buttonWithType:UIButtonTypeSystem];
@@ -129,7 +122,6 @@ static void insertVolBoostBtn(UIView *anchor, id target) {
     vb.frame = CGRectMake(anchor.frame.origin.x - 44, anchor.frame.origin.y, 40, 40);
 }
 
-// Macro so both overlay hooks share identical vol-boost method implementations
 #define IMPL_VOL_ACTIONS \
 %new(v@:@) \
 - (void)didPressVolBoost:(id)sender { \
@@ -144,7 +136,13 @@ static void insertVolBoostBtn(UIView *anchor, id target) {
     refreshVolBoostBtn((YTQTMButton *)[self viewWithTag:kVolBoostTag]); \
 }
 
-// ─── Video quality group (unchanged from original) ────────────────────────────
+// ─── Original button style helper ────────────────────────────────────────────
+static void setButtonStyle(YTQTMButton *button) {
+    button.titleLabel.numberOfLines = 3;
+    [button setTitle:@"Auto" forState:UIControlStateNormal];
+}
+
+// ─── Video group (unchanged) ──────────────────────────────────────────────────
 %group Video
 
 NSString *getCompactQualityLabel(MLFormat *format) {
@@ -185,7 +183,7 @@ NSString *getCompactQualityLabel(MLFormat *format) {
 
 %end
 
-// ─── Top overlay group ────────────────────────────────────────────────────────
+// ─── Top group (original + vol boost added) ───────────────────────────────────
 %group Top
 
 %hook YTMainAppControlsOverlayView
@@ -229,7 +227,7 @@ IMPL_VOL_ACTIONS
 
 %end
 
-// ─── Bottom overlay group ─────────────────────────────────────────────────────
+// ─── Bottom group (original + vol boost added) ────────────────────────────────
 %group Bottom
 
 %hook YTInlinePlayerBarContainerView
@@ -266,7 +264,7 @@ IMPL_VOL_ACTIONS
 
 %end
 
-// ─── Constructor ──────────────────────────────────────────────────────────────
+// ─── Constructor (original + gain restore) ────────────────────────────────────
 %ctor {
     currentGain = savedVolGain() / 100.f;
     initYTVideoOverlay(TweakKey, @{

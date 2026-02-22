@@ -1,10 +1,2 @@
-/* Quality Button */
-"ENABLED"  = "Show quality button";
-"POSITION" = "Quality button position";
-
-/* Volume Booster */
-"VOL_BOOST_SECTION"  = "Volume Booster";
-"VOL_BOOST_ENABLED"  = "Enable Volume Booster";
-"VOL_BOOST_GAIN"     = "Volume Gain";
-"VOL_BOOST_CUSTOM"   = "Custom Gain (%)";
-"VOL_BOOST_FOOTER"   = "Tap the mic button to cycle gain. Long-press to reset to 100%.";
+"ENABLED" = "Mostrar botón de calidad";
+"POSITION" = "Posición del botón de calidad";
