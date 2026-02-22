@@ -39,14 +39,12 @@ static void applyGain(float gain) {
     [p writeToFile:PREF_FILE atomically:YES];
 }
 
-// ─── AudioUnit hook (%hookf on a C function, per hookf.md) ───────────────────
-// AudioUnitSetParameter drives iOS mixer volume internally.
+// ─── AudioUnit C-function hook ────────────────────────────────────────────────
+// %hookf on AudioUnitSetParameter — the correct way to boost volume above 100%.
 // kMultiChannelMixerParam_Volume (== 0) on kAudioUnitScope_Input is YouTube's
-// audio bus. Accepts values above 1.0, so 4.0 = 400% with no extra engine needed.
+// audio bus. Accepts values above 1.0 natively, so 4.0 = 400% with no extra engine.
 %hookf(OSStatus, AudioUnitSetParameter, AudioUnit inUnit, AudioUnitParameterID inID, AudioUnitScope inScope, AudioUnitElement inElement, AudioUnitParameterValue inValue, UInt32 inBufferOffsetInFrames) {
-    if (volBoostEnabled()
-        && inID == kMultiChannelMixerParam_Volume
-        && inScope == kAudioUnitScope_Input) {
+    if (volBoostEnabled() && inID == kMultiChannelMixerParam_Volume && inScope == kAudioUnitScope_Input) {
         inValue *= currentGain;
     }
     return %orig(inUnit, inID, inScope, inElement, inValue, inBufferOffsetInFrames);
@@ -71,7 +69,7 @@ static void applyGain(float gain) {
 NSString *YouQualityUpdateNotification = @"YouQualityUpdateNotification";
 NSString *currentQualityLabel = @"N/A";
 
-// ─── Vol boost button helpers ─────────────────────────────────────────────────
+// ─── Vol boost button helpers (plain C — safe outside %hook) ──────────────────
 static const NSInteger kVolBoostTag = 0xB007;
 
 static YTQTMButton *makeVolBoostButton(id target) {
@@ -98,8 +96,7 @@ static void refreshVolBoostBtn(YTQTMButton *btn) {
     if (!btn) return;
     int pct = (int)roundf(currentGain * 100.f);
     if (@available(iOS 13, *)) {
-        [btn setImage:[UIImage systemImageNamed:pct > 100 ? @"mic.fill" : @"mic"]
-             forState:UIControlStateNormal];
+        [btn setImage:[UIImage systemImageNamed:pct > 100 ? @"mic.fill" : @"mic"] forState:UIControlStateNormal];
         btn.tintColor = pct > 100 ? UIColor.systemYellowColor : UIColor.whiteColor;
         btn.accessibilityValue = [NSString stringWithFormat:@"%d%%", pct];
     } else {
@@ -115,21 +112,7 @@ static void insertVolBoostBtn(UIView *anchor, id target) {
     vb.frame = CGRectMake(anchor.frame.origin.x - 44, anchor.frame.origin.y, 40, 40);
 }
 
-#define IMPL_VOL_ACTIONS \
-%new(v@:@) \
-- (void)didPressVolBoost:(id)sender { \
-    if (!volBoostEnabled()) return; \
-    applyGain(nextGain(currentGain)); \
-    refreshVolBoostBtn((YTQTMButton *)[self viewWithTag:kVolBoostTag]); \
-} \
-%new(v@:@) \
-- (void)handleVolBoostLongPress:(UILongPressGestureRecognizer *)gr { \
-    if (gr.state != UIGestureRecognizerStateBegan) return; \
-    applyGain(1.0f); \
-    refreshVolBoostBtn((YTQTMButton *)[self viewWithTag:kVolBoostTag]); \
-}
-
-// ─── Original button style helper ────────────────────────────────────────────
+// ─── Original button style helper ─────────────────────────────────────────────
 static void setButtonStyle(YTQTMButton *button) {
     button.titleLabel.numberOfLines = 3;
     [button setTitle:@"Auto" forState:UIControlStateNormal];
@@ -176,7 +159,7 @@ NSString *getCompactQualityLabel(MLFormat *format) {
 
 %end
 
-// ─── Top group (original + vol boost added) ───────────────────────────────────
+// ─── Top group ────────────────────────────────────────────────────────────────
 %group Top
 
 %hook YTMainAppControlsOverlayView
@@ -214,13 +197,25 @@ NSString *getCompactQualityLabel(MLFormat *format) {
     [self updateYouQualityButton:nil];
 }
 
-IMPL_VOL_ACTIONS
+%new(v@:@)
+- (void)didPressVolBoost:(id)sender {
+    if (!volBoostEnabled()) return;
+    applyGain(nextGain(currentGain));
+    refreshVolBoostBtn((YTQTMButton *)[self viewWithTag:kVolBoostTag]);
+}
+
+%new(v@:@)
+- (void)handleVolBoostLongPress:(UILongPressGestureRecognizer *)gr {
+    if (gr.state != UIGestureRecognizerStateBegan) return;
+    applyGain(1.0f);
+    refreshVolBoostBtn((YTQTMButton *)[self viewWithTag:kVolBoostTag]);
+}
 
 %end
 
 %end
 
-// ─── Bottom group (original + vol boost added) ────────────────────────────────
+// ─── Bottom group ─────────────────────────────────────────────────────────────
 %group Bottom
 
 %hook YTInlinePlayerBarContainerView
@@ -251,13 +246,25 @@ IMPL_VOL_ACTIONS
     [self updateYouQualityButton:nil];
 }
 
-IMPL_VOL_ACTIONS
+%new(v@:@)
+- (void)didPressVolBoost:(id)sender {
+    if (!volBoostEnabled()) return;
+    applyGain(nextGain(currentGain));
+    refreshVolBoostBtn((YTQTMButton *)[self viewWithTag:kVolBoostTag]);
+}
+
+%new(v@:@)
+- (void)handleVolBoostLongPress:(UILongPressGestureRecognizer *)gr {
+    if (gr.state != UIGestureRecognizerStateBegan) return;
+    applyGain(1.0f);
+    refreshVolBoostBtn((YTQTMButton *)[self viewWithTag:kVolBoostTag]);
+}
 
 %end
 
 %end
 
-// ─── Constructor (original + gain restore) ────────────────────────────────────
+// ─── Constructor ──────────────────────────────────────────────────────────────
 %ctor {
     currentGain = savedVolGain() / 100.f;
     initYTVideoOverlay(TweakKey, @{
