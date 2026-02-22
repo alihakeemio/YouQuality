@@ -76,10 +76,12 @@ static void setQualityButtonStyle(YTQTMButton *button) {
 
 static void updateVolBoostButtonLabel(YTQTMButton *button) {
     if (!button) return;
-    button.titleLabel.numberOfLines = 2;
+    button.titleLabel.numberOfLines = 1;
     // Mic icon + current gain percentage
-    [button setTitle:[NSString stringWithFormat:@"🎙\n%@", gainLabel()]
-            forState:UIControlStateNormal];
+    //[button setTitle:[NSString stringWithFormat:@"🎙\n%@", gainLabel()]
+    //        forState:UIControlStateNormal];
+    [button setTitle:gainLabel()
+        forState:UIControlStateNormal];
 }
 
 static void attachLongPress(YTQTMButton *button, id target) {
