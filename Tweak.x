@@ -70,42 +70,51 @@ static void addLongPress(YTQTMButton *button, id target) {
 }
 
 // ─── Audio boost hooks ────────────────────────────────────────────────────────
-// Strategy: hook at two levels for maximum coverage.
+// Class-dump analysis:
 //
-// 1) AVAudioMixerNode.outputVolume  — Apple framework class; this is the real
-//    signal-level gain knob that HAMAudioEngine feeds all audio through.
-//    Accepts values > 1.0 natively for true amplification.
+// HAMAudioEngine.outputVolume is FULLY SYNTHESIZED — setOutputVolume: only
+// writes to _outputVolume ivar, nothing reads it back to set _mixerNode.
+// So %orig(volume * gain) on setOutputVolume: was silently doing nothing.
 //
-// 2) HAMAudioEngineTrackRenderer.setVolume:  — per-track volume that YouTube
-//    sets independently of the mixer. Multiplying here ensures gain is applied
-//    even when only the track volume is updated (e.g. after seek/resume).
+// AVSampleBufferAudioRenderer.volume is CLAMPED to 0.0–1.0 by Apple —
+// passing > 1.0 has zero effect on the SBAR path.
 //
-// HAMAudioEngine.setOutputVolume: is intentionally NOT hooked: that method
-// only writes to the _outputVolume ivar and does NOT propagate to the mixer
-// node, so hooking it has no audible effect.
+// CORRECT FIX:
+//
+// AVAudioEngine path (HAMAudioEngineTrackRenderer):
+//   Hook setOutputVolume: and directly write engine.mainMixerNode.outputVolume.
+//   mainMixerNode.outputVolume accepts values > 1.0 for true amplification.
+//
+// SBAR path (HAMSBARAudioTrackRenderer):
+//   The renderer has normalizationCompensationGain which is a float multiplier
+//   applied inside updateGainAndRendererVolume before writing to the renderer.
+//   Hooking setNormalizationCompensationGain: boosts that multiplier.
+//   Also hook setVolume: so _volume itself carries the gain for when
+//   normalization is disabled (gain = 1.0 baseline).
+
 %group Audio
 
-%hook AVAudioMixerNode
+// ── AVAudioEngine path ────────────────────────────────────────────────────────
+%hook HAMAudioEngine
 
 - (void)setOutputVolume:(float)volume {
-    %orig(volume * currentGain);
+    %orig(volume);
+    // Directly drive the mixer node — the only place in this path that
+    // accepts > 1.0 for real signal amplification above 100%.
+    self.engine.mainMixerNode.outputVolume = volume * currentGain;
 }
 
 %end
 
-%hook HAMAudioEngineTrackRenderer
+// ── SBAR path ─────────────────────────────────────────────────────────────────
+%hook HAMSBARAudioTrackRenderer
 
-- (void)setVolume:(float)volume {
-    %orig(volume * currentGain);
+- (void)setNormalizationCompensationGain:(float)gain {
+    // This float is multiplied into the final AVSampleBufferAudioRenderer
+    // volume inside updateGainAndRendererVolume. Boosting it here is the only
+    // way to exceed 1.0 on the SBAR path since the renderer itself clamps.
+    %orig(gain * currentGain);
 }
-
-%end
-
-// HAMSBARAudioTrackRenderer sets volume directly on AVSampleBufferAudioRenderer
-// (confirmed from class dump — no setVolume: on the renderer itself).
-// AVSampleBufferAudioRenderer.volume is the Apple framework property that
-// controls gain on that rendering path.
-%hook AVSampleBufferAudioRenderer
 
 - (void)setVolume:(float)volume {
     %orig(volume * currentGain);
