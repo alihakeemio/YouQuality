@@ -43,14 +43,7 @@ static void applyGain(float gain) {
 // AudioUnitSetParameter drives iOS mixer volume internally.
 // kMultiChannelMixerParam_Volume (== 0) on kAudioUnitScope_Input is YouTube's
 // audio bus. Accepts values above 1.0, so 4.0 = 400% with no extra engine needed.
-%hookf(OSStatus, AudioUnitSetParameter,
-    AudioUnit               inUnit,
-    AudioUnitParameterID    inID,
-    AudioUnitScope          inScope,
-    AudioUnitElement        inElement,
-    AudioUnitParameterValue inValue,
-    UInt32                  inBufferOffsetInFrames)
-{
+%hookf(OSStatus, AudioUnitSetParameter, AudioUnit inUnit, AudioUnitParameterID inID, AudioUnitScope inScope, AudioUnitElement inElement, AudioUnitParameterValue inValue, UInt32 inBufferOffsetInFrames) {
     if (volBoostEnabled()
         && inID == kMultiChannelMixerParam_Volume
         && inScope == kAudioUnitScope_Input) {
