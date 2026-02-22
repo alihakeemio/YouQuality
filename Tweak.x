@@ -1,7 +1,6 @@
 #import "../YTVideoOverlay/Header.h"
 #import "../YTVideoOverlay/Init.x"
 #import <YouTubeHeader/YTMainAppVideoPlayerOverlayViewController.h>
-#import <AVFoundation/AVFoundation.h>
 
 #define TweakKey  @"YouQuality"
 #define PREF_FILE @"/var/mobile/Library/Preferences/com.ps.youquality.plist"
@@ -63,8 +62,8 @@ NSString *currentQualityLabel = @"N/A";
 // ─── Vol boost button helpers ─────────────────────────────────────────────────
 static const NSInteger kVolBoostTag = 0xB007;
 
-static YTQTMButton *makeVolBoostButton(id target) {
-    YTQTMButton *btn = [YTQTMButton buttonWithType:UIButtonTypeSystem];
+static UIButton *makeVolBoostButton(id target) {
+    UIButton *btn = [UIButton buttonWithType:UIButtonTypeSystem];
     if (@available(iOS 13, *)) {
         [btn setImage:[UIImage systemImageNamed:@"mic"] forState:UIControlStateNormal];
         btn.tintColor = UIColor.whiteColor;
@@ -83,7 +82,7 @@ static YTQTMButton *makeVolBoostButton(id target) {
     return btn;
 }
 
-static void refreshVolBoostBtn(YTQTMButton *btn) {
+static void refreshVolBoostBtn(UIButton *btn) {
     if (!btn) return;
     int pct = (int)roundf(currentGain * 100.f);
     if (@available(iOS 13, *)) {
@@ -97,7 +96,7 @@ static void refreshVolBoostBtn(YTQTMButton *btn) {
 
 static void insertVolBoostBtn(UIView *anchor, id target) {
     if (!volBoostEnabled() || !anchor || !anchor.superview) return;
-    YTQTMButton *vb = makeVolBoostButton(target);
+    UIButton *vb = makeVolBoostButton(target);
     vb.tag = kVolBoostTag;
     [anchor.superview insertSubview:vb aboveSubview:anchor];
     vb.frame = CGRectMake(anchor.frame.origin.x - 44, anchor.frame.origin.y, 40, 40);
@@ -202,14 +201,14 @@ NSString *getCompactQualityLabel(MLFormat *format) {
 - (void)didPressVolBoost:(id)sender {
     if (!volBoostEnabled()) return;
     applyGain(nextGain(currentGain));
-    refreshVolBoostBtn((YTQTMButton *)[self viewWithTag:kVolBoostTag]);
+    refreshVolBoostBtn((UIButton *)[self viewWithTag:kVolBoostTag]);
 }
 
 %new(v@:@)
 - (void)handleVolBoostLongPress:(UILongPressGestureRecognizer *)gr {
     if (gr.state != UIGestureRecognizerStateBegan) return;
     applyGain(1.0f);
-    refreshVolBoostBtn((YTQTMButton *)[self viewWithTag:kVolBoostTag]);
+    refreshVolBoostBtn((UIButton *)[self viewWithTag:kVolBoostTag]);
 }
 
 %end
@@ -251,14 +250,14 @@ NSString *getCompactQualityLabel(MLFormat *format) {
 - (void)didPressVolBoost:(id)sender {
     if (!volBoostEnabled()) return;
     applyGain(nextGain(currentGain));
-    refreshVolBoostBtn((YTQTMButton *)[self viewWithTag:kVolBoostTag]);
+    refreshVolBoostBtn((UIButton *)[self viewWithTag:kVolBoostTag]);
 }
 
 %new(v@:@)
 - (void)handleVolBoostLongPress:(UILongPressGestureRecognizer *)gr {
     if (gr.state != UIGestureRecognizerStateBegan) return;
     applyGain(1.0f);
-    refreshVolBoostBtn((YTQTMButton *)[self viewWithTag:kVolBoostTag]);
+    refreshVolBoostBtn((UIButton *)[self viewWithTag:kVolBoostTag]);
 }
 
 %end
