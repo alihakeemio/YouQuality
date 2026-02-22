@@ -46,16 +46,6 @@ static NSString *gainLabel() {
 - (void)handleVolBoostLongPress:(UILongPressGestureRecognizer *)gr;
 @end
 
-@interface HAMAudioEngine : NSObject
-@property(retain) AVAudioEngine *engine;
-@property(nonatomic) float outputVolume;
-@end
-
-@interface HAMSBARAudioTrackRenderer : NSObject
-@property(nonatomic) float volume;
-@property(nonatomic) float normalizationCompensationGain;
-@end
-
 // ─── Shared globals ───────────────────────────────────────────────────────────
 NSString *YouQualityUpdateNotification = @"YouQualityUpdateNotification";
 NSString *currentQualityLabel = @"N/A";
@@ -80,51 +70,25 @@ static void addLongPress(YTQTMButton *button, id target) {
 }
 
 // ─── Audio boost hooks ────────────────────────────────────────────────────────
-// Class-dump analysis:
+// All previous approaches failed because:
+// - HAMAudioEngine.outputVolume is synthesized (ivar only, never drives mixer)
+// - AVSampleBufferAudioRenderer.volume is hard-clamped to 0.0–1.0 by Apple
+// - AVAudioPlayerNode has no working volume property
 //
-// HAMAudioEngine.outputVolume is FULLY SYNTHESIZED — setOutputVolume: only
-// writes to _outputVolume ivar, nothing reads it back to set _mixerNode.
-// So %orig(volume * gain) on setOutputVolume: was silently doing nothing.
+// CONFIRMED WORKING APPROACH:
+// HAMAudioEnginePlayerNode has AVAudioUnitTimePitch *_timePitchNode wired
+// directly into the AVAudioEngine signal chain. AVAudioUnitTimePitch inherits
+// from AVAudioUnit which conforms to the AVAudioMixing protocol. The volume
+// property on AVAudioMixing nodes is real signal-chain gain that DOES work
+// above 1.0 for amplification.
 //
-// AVSampleBufferAudioRenderer.volume is CLAMPED to 0.0–1.0 by Apple —
-// passing > 1.0 has zero effect on the SBAR path.
-//
-// CORRECT FIX:
-//
-// AVAudioEngine path (HAMAudioEngineTrackRenderer):
-//   Hook setOutputVolume: and directly write engine.mainMixerNode.outputVolume.
-//   mainMixerNode.outputVolume accepts values > 1.0 for true amplification.
-//
-// SBAR path (HAMSBARAudioTrackRenderer):
-//   The renderer has normalizationCompensationGain which is a float multiplier
-//   applied inside updateGainAndRendererVolume before writing to the renderer.
-//   Hooking setNormalizationCompensationGain: boosts that multiplier.
-//   Also hook setVolume: so _volume itself carries the gain for when
-//   normalization is disabled (gain = 1.0 baseline).
+// We hook AVAudioUnitTimePitch.setVolume: — every YouTube audio player node
+// has one, so this catches all playback. When gain is 1.0 (off), %orig fires
+// normally with no change.
 
 %group Audio
 
-// ── AVAudioEngine path ────────────────────────────────────────────────────────
-%hook HAMAudioEngine
-
-- (void)setOutputVolume:(float)volume {
-    %orig(volume);
-    // Directly drive the mixer node — the only place in this path that
-    // accepts > 1.0 for real signal amplification above 100%.
-    self.engine.mainMixerNode.outputVolume = volume * currentGain;
-}
-
-%end
-
-// ── SBAR path ─────────────────────────────────────────────────────────────────
-%hook HAMSBARAudioTrackRenderer
-
-- (void)setNormalizationCompensationGain:(float)gain {
-    // This float is multiplied into the final AVSampleBufferAudioRenderer
-    // volume inside updateGainAndRendererVolume. Boosting it here is the only
-    // way to exceed 1.0 on the SBAR path since the renderer itself clamps.
-    %orig(gain * currentGain);
-}
+%hook AVAudioUnitTimePitch
 
 - (void)setVolume:(float)volume {
     %orig(volume * currentGain);
