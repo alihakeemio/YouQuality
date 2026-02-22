@@ -8,6 +8,7 @@
 #define VolBoostKey @"YouQualityVolBoost"
 #define GainKey     @"YouQualityVolBoost-Gain"
 
+static void applyGainImmediately(); // forward declaration
 // ─── Gain state ───────────────────────────────────────────────────────────────
 static float currentGain = 1.0f;
 
@@ -23,6 +24,7 @@ static void saveGain(float gain) {
     if (gain > 4.0f) gain = 4.0f;
     currentGain = gain;
     [[NSUserDefaults standardUserDefaults] setFloat:gain forKey:GainKey];
+    applyGainImmediately();
 }
 
 // Tap cycles: 100 -> 150 -> 200 -> 250 -> 300 -> 350 -> 400 -> 100
@@ -76,10 +78,8 @@ static void updateVolBoostButtonLabel(YTQTMButton *button) {
     if (!button) return;
     button.titleLabel.numberOfLines = 2;
     // Mic icon + current gain percentage
-    //[button setTitle:[NSString stringWithFormat:@"🎙\n%@", gainLabel()]
-    //       forState:UIControlStateNormal];
-    [button setTitle:gainLabel()
-        forState:UIControlStateNormal];
+    [button setTitle:[NSString stringWithFormat:@"🎙\n%@", gainLabel()]
+            forState:UIControlStateNormal];
 }
 
 static void attachLongPress(YTQTMButton *button, id target) {
@@ -95,29 +95,43 @@ static void attachLongPress(YTQTMButton *button, id target) {
     [button addGestureRecognizer:lp];
 }
 
-// ─── Audio hook ───────────────────────────────────────────────────────────────
-// Confirmed via Frida session:
-//   HAMSBARAudioTrackRenderer._renderer = AVSampleBufferAudioRenderer
-//   updateGainAndRendererVolume() pushes loudness-normalized volume to _renderer
-//   After %orig, _renderer.volume = normalized value (e.g. 0.447 at 50% system vol)
-//   AVSampleBufferAudioRenderer.volume accepts > 1.0 for true amplification
-//   Multiplying by currentGain after %orig applies boost on top of normalization
+// ─── Audio engine state ───────────────────────────────────────────────────────
+// Confirmed via Frida: hook updateGainAndRendererVolume, after %orig read
+// _renderer.volume (YouTube's normalized base), multiply by gain, set it back.
+// Store active instance + base so button press applies instantly without
+// needing pause/seek (mirrors the Frida script's applyGainNow logic exactly).
+
+static __weak HAMSBARAudioTrackRenderer *sActiveRenderer = nil;
+static float sBaseVolume = 1.0f;
+
+static void applyGainImmediately() {
+    HAMSBARAudioTrackRenderer *renderer = sActiveRenderer;
+    if (!renderer) return;
+    // Re-trigger YouTube's own normalization calculation, then our hook
+    // will multiply the result by currentGain — exactly like the Frida script.
+    [renderer updateGainAndRendererVolume];
+}
+
 %group Audio
 
 %hook HAMSBARAudioTrackRenderer
 
 - (void)updateGainAndRendererVolume {
     %orig;
-    if (currentGain <= 1.0f) return;
+
+    // Track the active instance (weak — won't prevent dealloc)
+    sActiveRenderer = self;
 
     Ivar ivar = class_getInstanceVariable([self class], "_renderer");
     if (!ivar) return;
+    AVSampleBufferAudioRenderer *r =
+        (__bridge AVSampleBufferAudioRenderer *)object_getIvar(self, ivar);
+    if (!r) return;
 
-    id renderer = object_getIvar(self, ivar);
-    if (!renderer) return;
-
-    AVSampleBufferAudioRenderer *r = (AVSampleBufferAudioRenderer *)renderer;
-    r.volume = r.volume * currentGain;
+    // Capture YouTube's normalized base volume, then boost
+    sBaseVolume = r.volume;
+    if (currentGain > 1.0f)
+        r.volume = sBaseVolume * currentGain;
 }
 
 %end
