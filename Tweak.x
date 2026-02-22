@@ -119,10 +119,13 @@ static void applyGainImmediately() {
 - (void)updateGainAndRendererVolume {
     %orig;
 
-    // MSHookIvar is the correct Theos macro for accessing ivars under ARC —
-    // avoids the __bridge cast issues that object_getIvar causes with ARC.
-    AVSampleBufferAudioRenderer *r = MSHookIvar<AVSampleBufferAudioRenderer *>(self, "_renderer");
-    if (!r) return;
+    // Assign to id first — ARC allows implicit id → specific class conversion,
+    // no __bridge or cast syntax needed, compiles cleanly in plain ObjC.
+    Ivar ivar = class_getInstanceVariable([self class], "_renderer");
+    if (!ivar) return;
+    id rendererObj = object_getIvar(self, ivar);
+    if (!rendererObj) return;
+    AVSampleBufferAudioRenderer *r = rendererObj;
 
     sActiveRenderer = self;
     sBaseVolume = r.volume;
