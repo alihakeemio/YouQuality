@@ -119,16 +119,12 @@ static void applyGainImmediately() {
 - (void)updateGainAndRendererVolume {
     %orig;
 
-    // Track the active instance (weak — won't prevent dealloc)
-    sActiveRenderer = self;
-
-    Ivar ivar = class_getInstanceVariable([self class], "_renderer");
-    if (!ivar) return;
-    AVSampleBufferAudioRenderer *r =
-        (AVSampleBufferAudioRenderer *)(__bridge id)object_getIvar(self, ivar);
+    // MSHookIvar is the correct Theos macro for accessing ivars under ARC —
+    // avoids the __bridge cast issues that object_getIvar causes with ARC.
+    AVSampleBufferAudioRenderer *r = MSHookIvar<AVSampleBufferAudioRenderer *>(self, "_renderer");
     if (!r) return;
 
-    // Capture YouTube's normalized base volume, then boost
+    sActiveRenderer = self;
     sBaseVolume = r.volume;
     if (currentGain > 1.0f)
         r.volume = sBaseVolume * currentGain;
