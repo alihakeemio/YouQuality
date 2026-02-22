@@ -46,6 +46,16 @@ static NSString *gainLabel() {
 - (void)handleVolBoostLongPress:(UILongPressGestureRecognizer *)gr;
 @end
 
+@interface HAMAudioEngine : NSObject
+@property(retain) AVAudioEngine *engine;
+@property(nonatomic) float outputVolume;
+@end
+
+@interface HAMSBARAudioTrackRenderer : NSObject
+@property(nonatomic) float volume;
+@property(nonatomic) float normalizationCompensationGain;
+@end
+
 // ─── Shared globals ───────────────────────────────────────────────────────────
 NSString *YouQualityUpdateNotification = @"YouQualityUpdateNotification";
 NSString *currentQualityLabel = @"N/A";
