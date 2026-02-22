@@ -1,21 +1,16 @@
 #import "../YTVideoOverlay/Header.h"
 #import "../YTVideoOverlay/Init.x"
 #import <YouTubeHeader/YTMainAppVideoPlayerOverlayViewController.h>
+#import <AudioToolbox/AudioToolbox.h>
 
 #define TweakKey    @"YouQuality"
 #define VolBoostKey @"YouQualityVolBoost"
 
 // ─── Gain state ───────────────────────────────────────────────────────────────
-// Stored in NSUserDefaults under key "YouQualityVolBoost-Gain"
-// 1.0 = 100%, 2.0 = 200%, etc.
 static float currentGain = 1.0f;
 
-static NSString *gainDefaultsKey() {
-    return @"YouQualityVolBoost-Gain";
-}
-
 static float savedVolGain() {
-    float g = (float)[[NSUserDefaults standardUserDefaults] floatForKey:gainDefaultsKey()];
+    float g = (float)[[NSUserDefaults standardUserDefaults] floatForKey:@"YouQualityVolBoost-Gain"];
     if (g < 1.0f) g = 1.0f;
     if (g > 4.0f) g = 4.0f;
     return g;
@@ -29,7 +24,7 @@ static float nextGain(float gain) {
 
 static void saveGain(float gain) {
     currentGain = gain;
-    [[NSUserDefaults standardUserDefaults] setFloat:gain forKey:gainDefaultsKey()];
+    [[NSUserDefaults standardUserDefaults] setFloat:gain forKey:@"YouQualityVolBoost-Gain"];
 }
 
 static NSString *gainLabel() {
@@ -42,7 +37,6 @@ static NSString *gainLabel() {
 - (void)didPressYouQuality:(id)arg;
 - (void)updateYouQualityButton:(id)arg;
 - (void)didPressVolBoost:(id)arg;
-- (void)updateVolBoostButton:(id)arg;
 - (void)handleVolBoostLongPress:(UILongPressGestureRecognizer *)gr;
 @end
 
@@ -50,7 +44,6 @@ static NSString *gainLabel() {
 - (void)didPressYouQuality:(id)arg;
 - (void)updateYouQualityButton:(id)arg;
 - (void)didPressVolBoost:(id)arg;
-- (void)updateVolBoostButton:(id)arg;
 - (void)handleVolBoostLongPress:(UILongPressGestureRecognizer *)gr;
 @end
 
@@ -58,7 +51,6 @@ static NSString *gainLabel() {
 NSString *YouQualityUpdateNotification = @"YouQualityUpdateNotification";
 NSString *currentQualityLabel = @"N/A";
 
-// ─── Button style helpers ─────────────────────────────────────────────────────
 static void setButtonStyle(YTQTMButton *button) {
     button.titleLabel.numberOfLines = 3;
     [button setTitle:@"Auto" forState:UIControlStateNormal];
@@ -66,24 +58,34 @@ static void setButtonStyle(YTQTMButton *button) {
 
 static void updateVolBoostLabel(YTQTMButton *button) {
     if (!button) return;
+    button.titleLabel.numberOfLines = 3;
     [button setTitle:gainLabel() forState:UIControlStateNormal];
 }
 
-static void addLongPressToVolBoostButton(YTQTMButton *button, id target) {
+static void addLongPress(YTQTMButton *button, id target) {
     if (!button) return;
-    // Remove any existing long press recognizers we added
-    for (UIGestureRecognizer *gr in button.gestureRecognizers) {
-        if ([gr isKindOfClass:[UILongPressGestureRecognizer class]]) {
-            [button removeGestureRecognizer:gr];
-        }
-    }
     UILongPressGestureRecognizer *lp = [[UILongPressGestureRecognizer alloc]
         initWithTarget:target action:@selector(handleVolBoostLongPress:)];
     lp.minimumPressDuration = 0.6;
     [button addGestureRecognizer:lp];
 }
 
-// ─── AVAudioMixerNode hook — inside Video group so %init(Video) picks it up ──
+// ─── AudioUnit C hook — must be outside groups, initialized via %init(Audio) ─
+// YouTube's HAMPlayer uses CoreAudio AudioUnit pipeline directly.
+// AudioUnitSetParameter with kMultiChannelMixerParam_Volume on kAudioUnitScope_Input
+// is the low-level call that controls audio bus volume — accepts values above 1.0.
+%group Audio
+
+%hookf(OSStatus, AudioUnitSetParameter, AudioUnit inUnit, AudioUnitParameterID inID, AudioUnitScope inScope, AudioUnitElement inElement, AudioUnitParameterValue inValue, UInt32 inBufferOffsetInFrames) {
+    if (inID == kMultiChannelMixerParam_Volume && inScope == kAudioUnitScope_Input) {
+        inValue *= currentGain;
+    }
+    return %orig(inUnit, inID, inScope, inElement, inValue, inBufferOffsetInFrames);
+}
+
+%end
+
+// ─── Video group ─────────────────────────────────────────────────────────────
 %group Video
 
 NSString *getCompactQualityLabel(MLFormat *format) {
@@ -103,37 +105,24 @@ NSString *getCompactQualityLabel(MLFormat *format) {
 }
 
 %hook YTVideoQualitySwitchOriginalController
-
 - (void)singleVideo:(id)singleVideo didSelectVideoFormat:(MLFormat *)format {
     currentQualityLabel = getCompactQualityLabel(format);
     [[NSNotificationCenter defaultCenter] postNotificationName:YouQualityUpdateNotification object:nil];
     %orig;
 }
-
 %end
 
 %hook YTVideoQualitySwitchRedesignedController
-
 - (void)singleVideo:(id)singleVideo didSelectVideoFormat:(MLFormat *)format {
     currentQualityLabel = getCompactQualityLabel(format);
     [[NSNotificationCenter defaultCenter] postNotificationName:YouQualityUpdateNotification object:nil];
     %orig;
 }
-
-%end
-
-// AVAudioMixerNode.outputVolume accepts values > 1.0 for true amplification
-%hook AVAudioMixerNode
-
-- (void)setOutputVolume:(float)volume {
-    %orig(volume * currentGain);
-}
-
 %end
 
 %end
 
-// ─── Top overlay group ────────────────────────────────────────────────────────
+// ─── Top overlay ──────────────────────────────────────────────────────────────
 %group Top
 
 %hook YTMainAppControlsOverlayView
@@ -143,7 +132,7 @@ NSString *getCompactQualityLabel(MLFormat *format) {
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(updateYouQualityButton:) name:YouQualityUpdateNotification object:nil];
     setButtonStyle(self.overlayButtons[TweakKey]);
     updateVolBoostLabel(self.overlayButtons[VolBoostKey]);
-    addLongPressToVolBoostButton(self.overlayButtons[VolBoostKey], self);
+    addLongPress(self.overlayButtons[VolBoostKey], self);
     return self;
 }
 
@@ -152,7 +141,7 @@ NSString *getCompactQualityLabel(MLFormat *format) {
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(updateYouQualityButton:) name:YouQualityUpdateNotification object:nil];
     setButtonStyle(self.overlayButtons[TweakKey]);
     updateVolBoostLabel(self.overlayButtons[VolBoostKey]);
-    addLongPressToVolBoostButton(self.overlayButtons[VolBoostKey], self);
+    addLongPress(self.overlayButtons[VolBoostKey], self);
     return self;
 }
 
@@ -190,7 +179,7 @@ NSString *getCompactQualityLabel(MLFormat *format) {
 
 %end
 
-// ─── Bottom overlay group ─────────────────────────────────────────────────────
+// ─── Bottom overlay ───────────────────────────────────────────────────────────
 %group Bottom
 
 %hook YTInlinePlayerBarContainerView
@@ -200,7 +189,7 @@ NSString *getCompactQualityLabel(MLFormat *format) {
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(updateYouQualityButton:) name:YouQualityUpdateNotification object:nil];
     setButtonStyle(self.overlayButtons[TweakKey]);
     updateVolBoostLabel(self.overlayButtons[VolBoostKey]);
-    addLongPressToVolBoostButton(self.overlayButtons[VolBoostKey], self);
+    addLongPress(self.overlayButtons[VolBoostKey], self);
     return self;
 }
 
@@ -242,18 +231,17 @@ NSString *getCompactQualityLabel(MLFormat *format) {
 // ─── Constructor ──────────────────────────────────────────────────────────────
 %ctor {
     currentGain = savedVolGain();
-    // Register quality button (original)
     initYTVideoOverlay(TweakKey, @{
         AccessibilityLabelKey: @"Quality",
         SelectorKey: @"didPressYouQuality:",
         AsTextKey: @YES
     });
-    // Register vol boost button — YTVideoOverlay handles show/hide and settings automatically
     initYTVideoOverlay(VolBoostKey, @{
         AccessibilityLabelKey: @"Vol",
         SelectorKey: @"didPressVolBoost:",
         AsTextKey: @YES
     });
+    %init(Audio);
     %init(Video);
     %init(Top);
     %init(Bottom);
