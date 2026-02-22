@@ -16,9 +16,8 @@ include $(THEOS)/makefiles/common.mk
 
 TWEAK_NAME = YouQuality
 
-$(TWEAK_NAME)_FILES      = Tweak.x
-$(TWEAK_NAME)_CFLAGS     = -fobjc-arc
-$(TWEAK_NAME)_FRAMEWORKS = UIKit
+$(TWEAK_NAME)_FILES = Tweak.x
+$(TWEAK_NAME)_CFLAGS = -fobjc-arc
 
 include $(THEOS_MAKE_PATH)/tweak.mk
 
@@ -30,4 +29,5 @@ setup:: clean all
 	@cp -v $(PWD)/$(TWEAK_NAME).plist /opt/simject/$(TWEAK_NAME).plist
 	@mkdir -p "$(PL_SIMULATOR_APPLICATION_SUPPORT_PATH)"
 	@cp -vR "$(PWD)/layout/Library/Application Support/$(TWEAK_NAME).bundle" "$(PL_SIMULATOR_APPLICATION_SUPPORT_PATH)/"
+	@cp -vR "$(PWD)/layout/Library/Application Support/$(TWEAK_NAME)VolBoost.bundle" "$(PL_SIMULATOR_APPLICATION_SUPPORT_PATH)/"
 endif
