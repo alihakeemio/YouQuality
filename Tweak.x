@@ -125,7 +125,7 @@ static void applyGainImmediately() {
     Ivar ivar = class_getInstanceVariable([self class], "_renderer");
     if (!ivar) return;
     AVSampleBufferAudioRenderer *r =
-        (__bridge AVSampleBufferAudioRenderer *)object_getIvar(self, ivar);
+        (AVSampleBufferAudioRenderer *)(__bridge id)object_getIvar(self, ivar);
     if (!r) return;
 
     // Capture YouTube's normalized base volume, then boost
