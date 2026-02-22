@@ -101,6 +101,18 @@ static void addLongPress(YTQTMButton *button, id target) {
 
 %end
 
+// HAMSBARAudioTrackRenderer sets volume directly on AVSampleBufferAudioRenderer
+// (confirmed from class dump — no setVolume: on the renderer itself).
+// AVSampleBufferAudioRenderer.volume is the Apple framework property that
+// controls gain on that rendering path.
+%hook AVSampleBufferAudioRenderer
+
+- (void)setVolume:(float)volume {
+    %orig(volume * currentGain);
+}
+
+%end
+
 %end
 
 // ─── Video group ─────────────────────────────────────────────────────────────
