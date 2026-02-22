@@ -16,8 +16,18 @@
 #define GainKey       @"YouQualityVolBoost-Gain"
 #define LabelModeKey  @"YouQualityLabelMode"   // 0 = %, 1 = dB
 
-// ─── Settings section ID ──────────────────────────────────────────────────────
-static const NSInteger YouQualitySection = 0x596F5551; // "YouQ"
+static const NSInteger YouQualitySection = 0x596F5551;
+
+// ─── Compilation Fixes ────────────────────────────────────────────────────────
+
+// Fix 1: Undefine LOC before defining it to prevent macro redefinition error
+#undef LOC
+#define LOC(x) [YouQualityBundle() localizedStringForKey:x value:x table:nil]
+
+// Fix 2: Declare the type property for YTSettingsGroupData
+@interface YTSettingsGroupData : NSObject
+@property (nonatomic, assign) NSInteger type;
+@end
 
 // ─── Bundle helper ────────────────────────────────────────────────────────────
 static NSBundle *YouQualityBundle() {
@@ -29,55 +39,6 @@ static NSBundle *YouQualityBundle() {
     });
     return bundle;
 }
-#define LOC(x) [YouQualityBundle() localizedStringForKey:x value:x table:nil]
-
-// ─── Label mode ───────────────────────────────────────────────────────────────
-static BOOL isDBMode() {
-    return [[NSUserDefaults standardUserDefaults] integerForKey:LabelModeKey] == 1;
-}
-
-// ─── Gain state ───────────────────────────────────────────────────────────────
-static void applyGainImmediately();
-static float currentGain = 1.0f;
-
-static float loadGain() {
-    float g = [[NSUserDefaults standardUserDefaults] floatForKey:GainKey];
-    if (g < 1.0f) g = 1.0f;
-    if (g > 4.0f) g = 4.0f;
-    return g;
-}
-
-static void saveGain(float gain) {
-    if (gain < 1.0f) gain = 1.0f;
-    if (gain > 4.0f) gain = 4.0f;
-    currentGain = gain;
-    [[NSUserDefaults standardUserDefaults] setFloat:gain forKey:GainKey];
-    applyGainImmediately();
-}
-
-// Tap cycles: 100% -> 150% -> 200% -> 250% -> 300% -> 350% -> 400% -> 100%
-static float nextGain(float gain) {
-    static const float steps[] = {1.0f, 1.5f, 2.0f, 2.5f, 3.0f, 3.5f, 4.0f};
-    for (int i = 0; i < 7; i++)
-        if (gain < steps[i] - 0.01f) return steps[i];
-    return 1.0f;
-}
-
-static NSString *gainLabel() {
-    if (isDBMode()) {
-        float dB = 20.0f * log10f(currentGain);
-        int dBint = (int)roundf(dB);
-        return dBint == 0 ? @"0dB" : [NSString stringWithFormat:@"+%ddB", dBint];
-    }
-    int pct = (int)roundf(currentGain * 100.f);
-    return [NSString stringWithFormat:@"%d%%", pct];
-}
-
-// ─── HAMSBARAudioTrackRenderer interface ──────────────────────────────────────
-@interface HAMSBARAudioTrackRenderer : NSObject
-@property (nonatomic, assign) float volume;
-- (void)updateGainAndRendererVolume;
-@end
 
 // ─── Forward declarations ─────────────────────────────────────────────────────
 @interface YTMainAppControlsOverlayView (YouQuality)
@@ -100,9 +61,64 @@ static NSString *gainLabel() {
 - (void)updateYouQualitySectionWithEntry:(id)entry;
 @end
 
-// ─── Shared globals ───────────────────────────────────────────────────────────
+// ─── Shared globals & Audio Logic ─────────────────────────────────────────────
 NSString *YouQualityUpdateNotification = @"YouQualityUpdateNotification";
 NSString *currentQualityLabel = @"N/A";
+
+static BOOL isDBMode() {
+    return [[NSUserDefaults standardUserDefaults] integerForKey:LabelModeKey] == 1;
+}
+
+static float currentGain = 1.0f;
+static NSPointerArray *gBoostEQNodes = nil;
+
+static float linearGainTodB(float gain) {
+    if (gain <= 1.0f) return 0.0f;
+    return 20.0f * log10f(gain);
+}
+
+static void updateAllEQGains() {
+    float dB = linearGainTodB(currentGain);
+    if (gBoostEQNodes) {
+        [gBoostEQNodes compact];
+        for (AVAudioUnitEQ *eq in gBoostEQNodes) {
+            if (eq) eq.globalGain = dB;
+        }
+    }
+}
+
+static float loadGain() {
+    float g = [[NSUserDefaults standardUserDefaults] floatForKey:GainKey];
+    if (g < 1.0f) g = 1.0f;
+    if (g > 4.0f) g = 4.0f;
+    return g;
+}
+
+static void saveGain(float gain) {
+    if (gain < 1.0f) gain = 1.0f;
+    if (gain > 4.0f) gain = 4.0f;
+    currentGain = gain;
+    [[NSUserDefaults standardUserDefaults] setFloat:gain forKey:GainKey];
+    [[NSUserDefaults standardUserDefaults] synchronize];
+    updateAllEQGains();
+}
+
+static float nextGain(float gain) {
+    static const float steps[] = {1.0f, 1.5f, 2.0f, 2.5f, 3.0f, 3.5f, 4.0f};
+    for (int i = 0; i < 7; i++)
+        if (gain < steps[i] - 0.01f) return steps[i];
+    return 1.0f;
+}
+
+static NSString *gainLabel() {
+    if (isDBMode()) {
+        float dB = linearGainTodB(currentGain);
+        int dBint = (int)roundf(dB);
+        return dBint == 0 ? @"0dB" : [NSString stringWithFormat:@"+%ddB", dBint];
+    }
+    int pct = (int)roundf(currentGain * 100.f);
+    return [NSString stringWithFormat:@"%d%%", pct];
+}
 
 static void setQualityButtonStyle(YTQTMButton *button) {
     button.titleLabel.numberOfLines = 3;
@@ -126,43 +142,70 @@ static void attachLongPress(YTQTMButton *button, id target) {
     [button addGestureRecognizer:lp];
 }
 
-// ─── Audio engine state ───────────────────────────────────────────────────────
-static __weak HAMSBARAudioTrackRenderer *sActiveRenderer = nil;
-static float sBaseVolume = 1.0f;
-
-static void applyGainImmediately() {
-    HAMSBARAudioTrackRenderer *renderer = sActiveRenderer;
-    if (!renderer) return;
-    [renderer updateGainAndRendererVolume];
-}
+// ─── AUDIO ENGINE BOOST HOOKS ────────────────────────────────────────────────
 
 %group Audio
 
-%hook HAMSBARAudioTrackRenderer
-
-- (void)updateGainAndRendererVolume {
-    %orig;
-    Ivar ivar = class_getInstanceVariable([self class], "_renderer");
-    if (!ivar) return;
-    id rendererObj = object_getIvar(self, ivar);
-    if (!rendererObj) return;
-    AVSampleBufferAudioRenderer *r = rendererObj;
-    sActiveRenderer = self;
-    sBaseVolume = r.volume;
-    if (currentGain > 1.0f)
-        r.volume = sBaseVolume * currentGain;
-}
-
+// Force standard rendering to bypass 1.0 volume limit
+%hook YTIHamplayerColdConfig
+- (BOOL)mediaEngineClientEnableIosPassthroughRendering { return NO; }
+%end
+%hook MLHamplayerConfig
+- (BOOL)mediaEngineClientEnableIosPassthroughRendering { return NO; }
+%end
+%hook YTColdConfig
+- (BOOL)mediaEngineClientEnableIosPassthroughRendering { return NO; }
 %end
 
+// Inject EQ node into standard rendering graph
+%hook AVAudioEngine
+
+- (void)connect:(AVAudioNode *)node1 to:(AVAudioNode *)node2 format:(AVAudioFormat *)format {
+    if (node2 == self.outputNode) {
+        if (!gBoostEQNodes) gBoostEQNodes = [NSPointerArray weakObjectsPointerArray];
+        AVAudioUnitEQ *eq = nil;
+        for (AVAudioUnitEQ *e in gBoostEQNodes) {
+            if (e.engine == self) { eq = e; break; }
+        }
+        if (!eq) {
+            eq = [[AVAudioUnitEQ alloc] initWithNumberOfBands:0];
+            eq.globalGain = linearGainTodB(currentGain);
+            [self attachNode:eq];
+            [gBoostEQNodes addPointer:(__bridge void *)eq];
+        }
+        %orig(node1, eq, format);
+        %orig(eq, node2, format);
+        return;
+    }
+    %orig;
+}
+
+- (void)connect:(AVAudioNode *)node1 to:(AVAudioNode *)node2 fromBus:(AVAudioNodeBus)bus1 toBus:(AVAudioNodeBus)bus2 format:(AVAudioFormat *)format {
+    if (node2 == self.outputNode) {
+        if (!gBoostEQNodes) gBoostEQNodes = [NSPointerArray weakObjectsPointerArray];
+        AVAudioUnitEQ *eq = nil;
+        for (AVAudioUnitEQ *e in gBoostEQNodes) {
+            if (e.engine == self) { eq = e; break; }
+        }
+        if (!eq) {
+            eq = [[AVAudioUnitEQ alloc] initWithNumberOfBands:0];
+            eq.globalGain = linearGainTodB(currentGain);
+            [self attachNode:eq];
+            [gBoostEQNodes addPointer:(__bridge void *)eq];
+        }
+        %orig(node1, eq, bus1, 0, format);
+        %orig(eq, node2, 0, bus2, format);
+        return;
+    }
+    %orig;
+}
+%end
 %end
 
 // ─── In-app YouTube Settings ──────────────────────────────────────────────────
 %group Settings
 
 %hook YTSettingsGroupData
-
-// Support grouped settings experiment (Cairo / YTColdConfig)
 - (NSArray <NSNumber *> *)orderedCategories {
     if (self.type != 1 || class_getClassMethod(objc_getClass("YTSettingsGroupData"), @selector(tweaks)))
         return %orig;
@@ -170,12 +213,9 @@ static void applyGainImmediately() {
     [cats insertObject:@(YouQualitySection) atIndex:0];
     return cats.copy;
 }
-
 %end
 
 %hook YTAppSettingsPresentationData
-
-// Insert our row right after "General" in the standard settings list
 + (NSArray <NSNumber *> *)settingsCategoryOrder {
     NSArray *order = %orig;
     NSUInteger idx = [order indexOfObject:@(1)]; // 1 = General
@@ -184,24 +224,20 @@ static void applyGainImmediately() {
     [mutable insertObject:@(YouQualitySection) atIndex:idx + 1];
     return mutable.copy;
 }
-
 %end
 
 %hook YTSettingsSectionItemManager
-
 %new(v@:@)
 - (void)updateYouQualitySectionWithEntry:(id)entry {
     NSMutableArray *items = [NSMutableArray array];
     Class Item = %c(YTSettingsSectionItem);
     YTSettingsViewController *vc = [self valueForKey:@"_settingsViewControllerDelegate"];
 
-    // ── Vol Boost Label Mode ─────────────────────────────────────────────────
     YTSettingsSectionItem *modePicker = [Item
         itemWithTitle:LOC(@"VOL_BOOST_LABEL_MODE")
         accessibilityIdentifier:nil
         detailTextBlock:^NSString *() {
-            return [[NSUserDefaults standardUserDefaults] integerForKey:LabelModeKey] == 1
-                ? LOC(@"MODE_DB") : LOC(@"MODE_PCT");
+            return [[NSUserDefaults standardUserDefaults] integerForKey:LabelModeKey] == 1 ? LOC(@"MODE_DB") : LOC(@"MODE_PCT");
         }
         selectBlock:^BOOL (YTSettingsCell *cell, NSUInteger arg1) {
             NSInteger sel = [[NSUserDefaults standardUserDefaults] integerForKey:LabelModeKey];
@@ -232,7 +268,6 @@ static void applyGainImmediately() {
         }];
     [items addObject:modePicker];
 
-    // Register the section
     if ([vc respondsToSelector:@selector(setSectionItems:forCategory:title:icon:titleDescription:headerHidden:)])
         [vc setSectionItems:items forCategory:YouQualitySection title:@"YouQuality" icon:nil titleDescription:nil headerHidden:NO];
     else
@@ -246,9 +281,7 @@ static void applyGainImmediately() {
     }
     %orig;
 }
-
 %end
-
 %end
 
 // ─── Video group ──────────────────────────────────────────────────────────────
@@ -285,7 +318,6 @@ NSString *getCompactQualityLabel(MLFormat *format) {
     %orig;
 }
 %end
-
 %end
 
 // ─── Top overlay ──────────────────────────────────────────────────────────────
@@ -339,7 +371,6 @@ NSString *getCompactQualityLabel(MLFormat *format) {
     [self updateVolBoostButton];
 }
 
-// Long press = always reset to 0, regardless of label mode
 %new(v@:@)
 - (void)handleVolBoostLongPress:(UILongPressGestureRecognizer *)gr {
     if (gr.state != UIGestureRecognizerStateBegan) return;
@@ -348,7 +379,6 @@ NSString *getCompactQualityLabel(MLFormat *format) {
 }
 
 %end
-
 %end
 
 // ─── Bottom overlay ───────────────────────────────────────────────────────────
@@ -394,7 +424,6 @@ NSString *getCompactQualityLabel(MLFormat *format) {
     [self updateVolBoostButton];
 }
 
-// Long press = always reset to 0, regardless of label mode
 %new(v@:@)
 - (void)handleVolBoostLongPress:(UILongPressGestureRecognizer *)gr {
     if (gr.state != UIGestureRecognizerStateBegan) return;
@@ -403,22 +432,24 @@ NSString *getCompactQualityLabel(MLFormat *format) {
 }
 
 %end
-
 %end
 
 // ─── Constructor ──────────────────────────────────────────────────────────────
 %ctor {
     currentGain = loadGain();
+
     initYTVideoOverlay(TweakKey, @{
         AccessibilityLabelKey: @"Quality",
         SelectorKey: @"didPressYouQuality:",
         AsTextKey: @YES
     });
+
     initYTVideoOverlay(VolBoostKey, @{
         AccessibilityLabelKey: @"Volume Boost",
         SelectorKey: @"didPressVolBoost:",
         AsTextKey: @YES
     });
+
     %init(Audio);
     %init(Video);
     %init(Settings);
