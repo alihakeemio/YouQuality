@@ -69,15 +69,17 @@ static void addLongPress(YTQTMButton *button, id target) {
     [button addGestureRecognizer:lp];
 }
 
-// ─── Volume hook ──────────────────────────────────────────────────────────────
-// AVSampleBufferAudioRenderer is the ObjC class YouTube's HAMPlayer uses
-// internally to render decoded PCM audio. Its volume property accepts values
-// above 1.0, giving true amplification without any C function hooks.
+// ─── HAMAudioEngine hook ──────────────────────────────────────────────────────
+// Confirmed from class-dump: HAMAudioEngine has float outputVolume property
+// and holds an AVAudioMixerNode internally. This is YouTube's master audio
+// engine — hooking setOutputVolume: here affects all playback output.
+// Values above 1.0 are passed through to the underlying AVAudioMixerNode
+// which accepts them natively for true amplification above 100%.
 %group Audio
 
-%hook AVSampleBufferAudioRenderer
+%hook HAMAudioEngine
 
-- (void)setVolume:(float)volume {
+- (void)setOutputVolume:(float)volume {
     %orig(volume * currentGain);
 }
 
