@@ -1,27 +1,150 @@
 #import "../YTVideoOverlay/Header.h"
 #import "../YTVideoOverlay/Init.x"
 #import <YouTubeHeader/YTMainAppVideoPlayerOverlayViewController.h>
+#import <AudioToolbox/AudioToolbox.h>
 
-#define TweakKey @"YouQuality"
+#define TweakKey  @"YouQuality"
+#define PREF_FILE @"/var/mobile/Library/Preferences/com.ps.youquality.plist"
 
+// ─── Prefs ────────────────────────────────────────────────────────────────────
+static NSDictionary *prefs() {
+    return [NSDictionary dictionaryWithContentsOfFile:PREF_FILE] ?: @{};
+}
+static BOOL volBoostEnabled() {
+    id v = prefs()[@"volBoostEnabled"];
+    return v ? [v boolValue] : YES;
+}
+static float savedVolGain() {
+    id v = prefs()[@"volGain"];
+    float g = v ? [v floatValue] : 100.0f;
+    if (g < 100.0f) g = 100.0f;
+    if (g > 400.0f) g = 400.0f;
+    return g;
+}
+
+// ─── Gain state ───────────────────────────────────────────────────────────────
+static float currentGain = 1.0f; // 1.0 = 100%
+
+static float nextGain(float gain) {
+    static const int steps[] = {100, 125, 150, 175, 200, 250, 300, 350, 400};
+    int pct = (int)roundf(gain * 100.f);
+    for (int i = 0; i < 9; i++) if (pct < steps[i]) return steps[i] / 100.f;
+    return 1.0f;
+}
+
+static void applyGain(float gain) {
+    currentGain = gain;
+    NSMutableDictionary *p = [prefs() mutableCopy] ?: [NSMutableDictionary new];
+    p[@"volGain"] = @(gain * 100.f);
+    [p writeToFile:PREF_FILE atomically:YES];
+}
+
+// ─── AudioUnit hook ───────────────────────────────────────────────────────────
+// %hookf hooks a plain C function (see hookf.md in Tweak-Tutorial).
+// AudioUnitSetParameter is what iOS uses internally to drive mixer volume.
+// kMultiChannelMixerParam_Volume (== 0) on kAudioUnitScope_Input is the bus
+// that carries YouTube's audio. Unlike AVPlayer.volume (hard-capped at 1.0),
+// AudioUnitSetParameter accepts values above 1.0 — so 4.0 = 400% works natively.
+%hookf(OSStatus, AudioUnitSetParameter,
+    AudioUnit               inUnit,
+    AudioUnitParameterID    inID,
+    AudioUnitScope          inScope,
+    AudioUnitElement        inElement,
+    AudioUnitParameterValue inValue,
+    UInt32                  inBufferOffsetInFrames)
+{
+    if (volBoostEnabled()
+        && inID == kMultiChannelMixerParam_Volume
+        && inScope == kAudioUnitScope_Input) {
+        inValue *= currentGain;
+    }
+    return %orig(inUnit, inID, inScope, inElement, inValue, inBufferOffsetInFrames);
+}
+
+// ─── Forward declarations ─────────────────────────────────────────────────────
 @interface YTMainAppControlsOverlayView (YouQuality)
 - (void)didPressYouQuality:(id)arg;
 - (void)updateYouQualityButton:(id)arg;
+- (void)didPressVolBoost:(id)sender;
+- (void)handleVolBoostLongPress:(UILongPressGestureRecognizer *)gr;
 @end
 
 @interface YTInlinePlayerBarContainerView (YouQuality)
 - (void)didPressYouQuality:(id)arg;
 - (void)updateYouQualityButton:(id)arg;
+- (void)didPressVolBoost:(id)sender;
+- (void)handleVolBoostLongPress:(UILongPressGestureRecognizer *)gr;
 @end
 
+// ─── Shared globals ───────────────────────────────────────────────────────────
 NSString *YouQualityUpdateNotification = @"YouQualityUpdateNotification";
 NSString *currentQualityLabel = @"N/A";
 
+static const NSInteger kVolBoostTag = 0xB007;
+
+// ─── Button helpers ───────────────────────────────────────────────────────────
 static void setButtonStyle(YTQTMButton *button) {
     button.titleLabel.numberOfLines = 3;
     [button setTitle:@"Auto" forState:UIControlStateNormal];
 }
 
+static YTQTMButton *makeVolBoostButton(id target) {
+    YTQTMButton *btn = [YTQTMButton buttonWithType:UIButtonTypeSystem];
+    if (@available(iOS 13, *)) {
+        [btn setImage:[UIImage systemImageNamed:@"mic"] forState:UIControlStateNormal];
+        btn.tintColor = UIColor.whiteColor;
+    } else {
+        btn.titleLabel.numberOfLines = 2;
+        btn.titleLabel.font = [UIFont boldSystemFontOfSize:10];
+        [btn setTitle:@"MIC\n100%" forState:UIControlStateNormal];
+        [btn setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
+    }
+    btn.accessibilityLabel = @"Volume Boost";
+    [btn addTarget:target action:@selector(didPressVolBoost:) forControlEvents:UIControlEventTouchUpInside];
+    UILongPressGestureRecognizer *lp = [[UILongPressGestureRecognizer alloc]
+        initWithTarget:target action:@selector(handleVolBoostLongPress:)];
+    lp.minimumPressDuration = 0.5;
+    [btn addGestureRecognizer:lp];
+    return btn;
+}
+
+static void refreshVolBoostBtn(YTQTMButton *btn) {
+    if (!btn) return;
+    int pct = (int)roundf(currentGain * 100.f);
+    if (@available(iOS 13, *)) {
+        [btn setImage:[UIImage systemImageNamed:pct > 100 ? @"mic.fill" : @"mic"]
+             forState:UIControlStateNormal];
+        btn.tintColor = pct > 100 ? UIColor.systemYellowColor : UIColor.whiteColor;
+        btn.accessibilityValue = [NSString stringWithFormat:@"%d%%", pct];
+    } else {
+        [btn setTitle:[NSString stringWithFormat:@"MIC\n%d%%", pct] forState:UIControlStateNormal];
+    }
+}
+
+static void insertVolBoostBtn(UIView *anchor, id target) {
+    if (!volBoostEnabled() || !anchor || !anchor.superview) return;
+    YTQTMButton *vb = makeVolBoostButton(target);
+    vb.tag = kVolBoostTag;
+    [anchor.superview insertSubview:vb aboveSubview:anchor];
+    vb.frame = CGRectMake(anchor.frame.origin.x - 44, anchor.frame.origin.y, 40, 40);
+}
+
+// Macro so both overlay hooks share identical vol-boost method implementations
+#define IMPL_VOL_ACTIONS \
+%new(v@:@) \
+- (void)didPressVolBoost:(id)sender { \
+    if (!volBoostEnabled()) return; \
+    applyGain(nextGain(currentGain)); \
+    refreshVolBoostBtn((YTQTMButton *)[self viewWithTag:kVolBoostTag]); \
+} \
+%new(v@:@) \
+- (void)handleVolBoostLongPress:(UILongPressGestureRecognizer *)gr { \
+    if (gr.state != UIGestureRecognizerStateBegan) return; \
+    applyGain(1.0f); \
+    refreshVolBoostBtn((YTQTMButton *)[self viewWithTag:kVolBoostTag]); \
+}
+
+// ─── Video quality group (unchanged from original) ────────────────────────────
 %group Video
 
 NSString *getCompactQualityLabel(MLFormat *format) {
@@ -62,6 +185,7 @@ NSString *getCompactQualityLabel(MLFormat *format) {
 
 %end
 
+// ─── Top overlay group ────────────────────────────────────────────────────────
 %group Top
 
 %hook YTMainAppControlsOverlayView
@@ -70,6 +194,7 @@ NSString *getCompactQualityLabel(MLFormat *format) {
     self = %orig;
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(updateYouQualityButton:) name:YouQualityUpdateNotification object:nil];
     setButtonStyle(self.overlayButtons[TweakKey]);
+    insertVolBoostBtn(self.overlayButtons[TweakKey], self);
     return self;
 }
 
@@ -77,6 +202,7 @@ NSString *getCompactQualityLabel(MLFormat *format) {
     self = %orig;
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(updateYouQualityButton:) name:YouQualityUpdateNotification object:nil];
     setButtonStyle(self.overlayButtons[TweakKey]);
+    insertVolBoostBtn(self.overlayButtons[TweakKey], self);
     return self;
 }
 
@@ -97,10 +223,13 @@ NSString *getCompactQualityLabel(MLFormat *format) {
     [self updateYouQualityButton:nil];
 }
 
-%end
+IMPL_VOL_ACTIONS
 
 %end
 
+%end
+
+// ─── Bottom overlay group ─────────────────────────────────────────────────────
 %group Bottom
 
 %hook YTInlinePlayerBarContainerView
@@ -109,6 +238,7 @@ NSString *getCompactQualityLabel(MLFormat *format) {
     self = %orig;
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(updateYouQualityButton:) name:YouQualityUpdateNotification object:nil];
     setButtonStyle(self.overlayButtons[TweakKey]);
+    insertVolBoostBtn(self.overlayButtons[TweakKey], self);
     return self;
 }
 
@@ -130,11 +260,15 @@ NSString *getCompactQualityLabel(MLFormat *format) {
     [self updateYouQualityButton:nil];
 }
 
-%end
+IMPL_VOL_ACTIONS
 
 %end
 
+%end
+
+// ─── Constructor ──────────────────────────────────────────────────────────────
 %ctor {
+    currentGain = savedVolGain() / 100.f;
     initYTVideoOverlay(TweakKey, @{
         AccessibilityLabelKey: @"Quality",
         SelectorKey: @"didPressYouQuality:",
