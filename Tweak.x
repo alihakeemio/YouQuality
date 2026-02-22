@@ -1,7 +1,6 @@
 #import "../YTVideoOverlay/Header.h"
 #import "../YTVideoOverlay/Init.x"
 #import <YouTubeHeader/YTMainAppVideoPlayerOverlayViewController.h>
-#import <AudioToolbox/AudioToolbox.h>
 
 #define TweakKey    @"YouQuality"
 #define VolBoostKey @"YouQualityVolBoost"
@@ -70,18 +69,19 @@ static void addLongPress(YTQTMButton *button, id target) {
     [button addGestureRecognizer:lp];
 }
 
-// ─── AudioUnit C hook — must be outside groups, initialized via %init(Audio) ─
-// YouTube's HAMPlayer uses CoreAudio AudioUnit pipeline directly.
-// AudioUnitSetParameter with kMultiChannelMixerParam_Volume on kAudioUnitScope_Input
-// is the low-level call that controls audio bus volume — accepts values above 1.0.
+// ─── Volume hook ──────────────────────────────────────────────────────────────
+// AVSampleBufferAudioRenderer is the ObjC class YouTube's HAMPlayer uses
+// internally to render decoded PCM audio. Its volume property accepts values
+// above 1.0, giving true amplification without any C function hooks.
 %group Audio
 
-%hookf(OSStatus, AudioUnitSetParameter, AudioUnit inUnit, AudioUnitParameterID inID, AudioUnitScope inScope, AudioUnitElement inElement, AudioUnitParameterValue inValue, UInt32 inBufferOffsetInFrames) {
-    if (inID == kMultiChannelMixerParam_Volume && inScope == kAudioUnitScope_Input) {
-        inValue *= currentGain;
-    }
-    return %orig(inUnit, inID, inScope, inElement, inValue, inBufferOffsetInFrames);
+%hook AVSampleBufferAudioRenderer
+
+- (void)setVolume:(float)volume {
+    %orig(volume * currentGain);
 }
+
+%end
 
 %end
 
