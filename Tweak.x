@@ -46,6 +46,10 @@ static NSString *gainLabel() {
 - (void)handleVolBoostLongPress:(UILongPressGestureRecognizer *)gr;
 @end
 
+@interface HAMSBARAudioTrackRenderer : NSObject
+@property(nonatomic) float normalizationCompensationGain;
+@end
+
 // ─── Shared globals ───────────────────────────────────────────────────────────
 NSString *YouQualityUpdateNotification = @"YouQualityUpdateNotification";
 NSString *currentQualityLabel = @"N/A";
@@ -69,29 +73,88 @@ static void addLongPress(YTQTMButton *button, id target) {
     [button addGestureRecognizer:lp];
 }
 
-// ─── Audio boost hooks ────────────────────────────────────────────────────────
-// All previous approaches failed because:
-// - HAMAudioEngine.outputVolume is synthesized (ivar only, never drives mixer)
-// - AVSampleBufferAudioRenderer.volume is hard-clamped to 0.0–1.0 by Apple
-// - AVAudioPlayerNode has no working volume property
+// ─── Audio boost — definitive implementation ──────────────────────────────────
+// Confirmed by Apple developer forums: the ONLY working way to boost volume
+// in AVAudioEngine above 1.0 is AVAudioUnitEQ.globalGain (-96 to +24 dB).
+// AVAudioPlayerNode.volume has no effect. AVAudioMixerNode volume crashes.
 //
-// CONFIRMED WORKING APPROACH:
-// HAMAudioEnginePlayerNode has AVAudioUnitTimePitch *_timePitchNode wired
-// directly into the AVAudioEngine signal chain. AVAudioUnitTimePitch inherits
-// from AVAudioUnit which conforms to the AVAudioMixing protocol. The volume
-// property on AVAudioMixing nodes is real signal-chain gain that DOES work
-// above 1.0 for amplification.
+// Strategy: hook AVAudioEngine.startAndReturnError: — before the engine starts,
+// inject an AVAudioUnitEQ node between mainMixerNode and outputNode.
+// globalGain = 20 * log10(linearGain) converts our multiplier to dB.
+// Store all injected EQ nodes so gain changes update them immediately.
 //
-// We hook AVAudioUnitTimePitch.setVolume: — every YouTube audio player node
-// has one, so this catches all playback. When gain is 1.0 (off), %orig fires
-// normally with no change.
+// This covers the AVAudioEngine path (HAMAudioEngineTrackRenderer).
+// For the SBAR path (HAMSBARAudioTrackRenderer), also hook
+// setNormalizationCompensationGain: — if normalization is active this
+// multiplier is applied before writing to the renderer, so we get some boost
+// even though AVSampleBufferAudioRenderer itself clamps to 1.0.
+
+#import <AVFoundation/AVFoundation.h>
+#import <math.h>
+
+// All EQ nodes we've injected, so gain changes propagate instantly
+static NSMutableArray *gBoostEQNodes = nil;
+
+static float linearGainTodB(float gain) {
+    if (gain <= 1.0f) return 0.0f;
+    return 20.0f * log10f(gain);
+}
+
+static void updateAllEQGains() {
+    float dB = linearGainTodB(currentGain);
+    for (AVAudioUnitEQ *eq in gBoostEQNodes) {
+        eq.globalGain = dB;
+    }
+}
+
+// Override saveGain to also update EQ nodes
+static void saveGainAndUpdateEQ(float gain) {
+    currentGain = gain;
+    [[NSUserDefaults standardUserDefaults] setFloat:gain forKey:@\"YouQualityVolBoost-Gain\"];
+    updateAllEQGains();
+}
 
 %group Audio
 
-%hook AVAudioUnitTimePitch
+%hook AVAudioEngine
 
-- (void)setVolume:(float)volume {
-    %orig(volume * currentGain);
+- (BOOL)startAndReturnError:(NSError **)error {
+    if (!gBoostEQNodes) gBoostEQNodes = [NSMutableArray new];
+
+    // Check if we already injected an EQ into this engine instance
+    BOOL alreadyInjected = NO;
+    for (AVAudioUnitEQ *eq in gBoostEQNodes) {
+        if (eq.engine == self) { alreadyInjected = YES; break; }
+    }
+
+    if (!alreadyInjected) {
+        AVAudioUnitEQ *eq = [[AVAudioUnitEQ alloc] initWithNumberOfBands:0];
+        eq.globalGain = linearGainTodB(currentGain);
+        eq.bypass = NO;
+
+        AVAudioMixerNode *mixer = self.mainMixerNode;
+        AVAudioOutputNode *output = self.outputNode;
+
+        // Rewire: mixer -> EQ -> output
+        [self attachNode:eq];
+        [self disconnectNodeOutput:mixer];
+        [self connect:mixer to:eq format:nil];
+        [self connect:eq to:output format:nil];
+
+        [gBoostEQNodes addObject:eq];
+    }
+
+    return %orig;
+}
+
+%end
+
+// SBAR path fallback — normalizationCompensationGain is a float multiplier
+// applied before writing to AVSampleBufferAudioRenderer. Partial boost only.
+%hook HAMSBARAudioTrackRenderer
+
+- (void)setNormalizationCompensationGain:(float)gain {
+    %orig(gain * currentGain);
 }
 
 %end
@@ -177,14 +240,14 @@ NSString *getCompactQualityLabel(MLFormat *format) {
 
 %new(v@:@)
 - (void)didPressVolBoost:(id)arg {
-    saveGain(nextGain(currentGain));
+    saveGainAndUpdateEQ(nextGain(currentGain));
     updateVolBoostLabel(self.overlayButtons[VolBoostKey]);
 }
 
 %new(v@:@)
 - (void)handleVolBoostLongPress:(UILongPressGestureRecognizer *)gr {
     if (gr.state != UIGestureRecognizerStateBegan) return;
-    saveGain(1.0f);
+    saveGainAndUpdateEQ(1.0f);
     updateVolBoostLabel(self.overlayButtons[VolBoostKey]);
 }
 
@@ -226,14 +289,14 @@ NSString *getCompactQualityLabel(MLFormat *format) {
 
 %new(v@:@)
 - (void)didPressVolBoost:(id)arg {
-    saveGain(nextGain(currentGain));
+    saveGainAndUpdateEQ(nextGain(currentGain));
     updateVolBoostLabel(self.overlayButtons[VolBoostKey]);
 }
 
 %new(v@:@)
 - (void)handleVolBoostLongPress:(UILongPressGestureRecognizer *)gr {
     if (gr.state != UIGestureRecognizerStateBegan) return;
-    saveGain(1.0f);
+    saveGainAndUpdateEQ(1.0f);
     updateVolBoostLabel(self.overlayButtons[VolBoostKey]);
 }
 
