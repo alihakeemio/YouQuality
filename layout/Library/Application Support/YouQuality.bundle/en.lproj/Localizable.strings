@@ -1,2 +1,7 @@
 "ENABLED" = "Show quality button";
 "POSITION" = "Quality button position";
+"VOL_BOOST_LABEL_MODE" = "Vol Boost Label Mode";
+"MODE_PCT"             = "Percentage (100%, 200%...)";
+"MODE_PCT_DESC"        = "Show gain as a percentage on the button";
+"MODE_DB"              = "Decibels (+3dB, +6dB...)";
+"MODE_DB_DESC"         = "Show gain in decibels on the button";
