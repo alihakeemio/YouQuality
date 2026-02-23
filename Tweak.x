@@ -1,26 +1,21 @@
 #import "../YTVideoOverlay/Header.h"
 #import "../YTVideoOverlay/Init.x"
 #import <YouTubeHeader/YTMainAppVideoPlayerOverlayViewController.h>
-#import <YouTubeHeader/YTSettingsViewController.h>
-#import <YouTubeHeader/YTSettingsSectionItem.h>
-#import <YouTubeHeader/YTSettingsSectionItemManager.h>
 #import <AVFoundation/AVFoundation.h>
 #import <objc/runtime.h>
 
 #define TweakKey            @"YouQuality"
 #define VolBoostKey         @"YouQualityVolBoost"
 #define GainKey             @"YouQualityVolBoost-Gain"
-#define PreviewMuteKey      @"YouQualityPreviewMute"
+#define PreviewMuteKey      @"YouQualityVolBoost-PreviewMute"
 #define BlockPreviewKey     @"YouQualityBlockPreview"
-
-static const NSInteger YouQualitySettingsCategory = 'yqly';
 
 static void applyGainImmediately();
 
 // ─── Settings ─────────────────────────────────────────────────────────────────
 static float currentGain        = 1.0f;
-static BOOL previewMuteEnabled  = YES;
-static BOOL blockPreviewEnabled = YES;
+static BOOL previewMuteEnabled  = NO;   // default OFF
+static BOOL blockPreviewEnabled = YES;  // default ON
 
 static float loadGain() {
     float g = [[NSUserDefaults standardUserDefaults] floatForKey:GainKey];
@@ -31,12 +26,12 @@ static float loadGain() {
 
 static BOOL loadPreviewMute() {
     NSNumber *val = [[NSUserDefaults standardUserDefaults] objectForKey:PreviewMuteKey];
-    return val ? [val boolValue] : YES;
+    return val ? [val boolValue] : NO; // default OFF
 }
 
 static BOOL loadBlockPreview() {
     NSNumber *val = [[NSUserDefaults standardUserDefaults] objectForKey:BlockPreviewKey];
-    return val ? [val boolValue] : YES;
+    return val ? [val boolValue] : YES; // default ON
 }
 
 static void saveGain(float gain) {
@@ -63,7 +58,6 @@ static NSString *gainLabel() {
 @interface HAMSBARAudioTrackRenderer : NSObject
 @property (nonatomic, assign) float volume;
 - (void)updateGainAndRendererVolume;
-- (void)setVolume:(float)volume;
 @end
 
 @interface MLHAMQueuePlayer : NSObject
@@ -71,16 +65,12 @@ static NSString *gainLabel() {
 - (void)setMuted:(BOOL)muted;
 @end
 
-// CMTime is a 32-byte struct. On ARM64 structs > 16 bytes are passed via hidden
-// pointer — we match that by declaring the parameter as a pointer (void *) so
-// the compiler generates the correct calling convention, same fix as Frida.
 @interface YTLocalPlaybackController : NSObject
 - (BOOL)isInlinePlaybackActive;
 - (void)loadWithPlayerPlayback:(id)playback;
+// CMTime (32 bytes) passed via hidden pointer on ARM64 — declared as void *
 - (void)loadWithPlayerTransition:(id)transition playbackConfig:(id)config initialTime:(void *)time;
-- (void)resetWithStoppageReason:(NSInteger)reason;
 @end
-
 
 @interface YTMainAppControlsOverlayView (YouQuality)
 - (void)didPressYouQuality:(id)arg;
@@ -96,14 +86,6 @@ static NSString *gainLabel() {
 - (void)didPressVolBoost:(id)arg;
 - (void)handleVolBoostLongPress:(UILongPressGestureRecognizer *)gr;
 - (void)updateVolBoostButton;
-@end
-
-@interface YTSettingsGroupData : NSObject
-- (instancetype)initWithGroupType:(NSInteger)groupType;
-@end
-
-@interface YTSettingsGroupData (YouGroupSettings)
-+ (NSMutableArray <NSNumber *> *)tweaks;
 @end
 
 // ─── Shared globals ───────────────────────────────────────────────────────────
@@ -145,15 +127,15 @@ static void applyGainImmediately() {
     [renderer updateGainAndRendererVolume];
 }
 
-// ─── Preview state ────────────────────────────────────────────────────────────
-// Keyed by MLHAMQueuePlayer pointer string.
-// sAllowSound:    YES = user explicitly unmuted this preview player
-// sPrevWasMute1:  YES = last setMuted: call was YES (used to detect vol button)
+// ─── Preview mute state ───────────────────────────────────────────────────────
+// MutePreview: track per-player allow/mute state.
+// sAllowSound keyed by MLHAMQueuePlayer ptr — YES means user manually unmuted.
+// sPrevWasMute1 — YES means last setMuted: call was YES (detects vol button pattern).
 static NSMutableDictionary<NSString *, NSNumber *> *sAllowSound   = nil;
 static NSMutableDictionary<NSString *, NSNumber *> *sPrevWasMute1 = nil;
 
-// Mirrors MutePreview.js isPreview(): checks _stickySettings ivar directly.
-// Preview players have no stickySettings (nil / null).
+// isPreview: mirrors MutePreview.js isPreview() — checks _stickySettings ivar.
+// Preview players have nil stickySettings; real players have it set.
 static BOOL isPreviewPlayer(id player) {
     @try {
         Ivar ivar = class_getInstanceVariable([player class], "_stickySettings");
@@ -168,7 +150,7 @@ static BOOL isPreviewPlayer(id player) {
 
 %hook HAMSBARAudioTrackRenderer
 
-// Existing vol boost logic — unchanged
+// Existing vol boost — unchanged
 - (void)updateGainAndRendererVolume {
     %orig;
     Ivar ivar = class_getInstanceVariable([self class], "_renderer");
@@ -183,8 +165,7 @@ static BOOL isPreviewPlayer(id player) {
 }
 
 // MutePreview.js: always block HAM setVolume for preview players.
-// HAM's _audioDelegate ivar is the owning MLHAMQueuePlayer.
-// AVR is the real audio gate — HAM volume is just suppressed entirely.
+// _audioDelegate ivar points to the owning MLHAMQueuePlayer.
 - (void)setVolume:(float)volume {
     if (!previewMuteEnabled || volume <= 0.0f) { %orig; return; }
     @try {
@@ -193,17 +174,16 @@ static BOOL isPreviewPlayer(id player) {
         id delegate = object_getIvar(self, ivar);
         if (!delegate) { %orig; return; }
         if (!isPreviewPlayer(delegate)) { %orig; return; }
-        // Preview player — block HAM volume unconditionally
-        return;
+        return; // block HAM volume for previews — AVR is the real gate
     } @catch (...) { %orig; }
 }
 
 %end
 
-// MutePreview.js setMuted: logic:
-//   setMuted:YES  → system/YouTube muted → mark prevWasMute1, clear allowSound
-//   setMuted:NO with prevWasMute1=YES → vol button pattern → block (don't call orig)
-//   setMuted:NO with prevWasMute1=NO  → manual unmute button → set allowSound=YES
+// MutePreview.js setMuted: pattern:
+//   YES  → system muted → mark prevWasMute1=YES, allowSound=NO
+//   NO after YES → vol button → block (don't call %orig)
+//   NO with no prior YES → manual unmute button → allowSound=YES
 %hook MLHAMQueuePlayer
 
 - (void)setMuted:(BOOL)muted {
@@ -218,32 +198,29 @@ static BOOL isPreviewPlayer(id player) {
         return;
     }
 
-    // setMuted:NO
     if ([sPrevWasMute1[ptr] boolValue]) {
-        // Vol button: preceded by setMuted:YES → block the unmute
         sPrevWasMute1[ptr] = @NO;
-        return; // do NOT call %orig — preview stays muted
+        return; // vol button — block unmute, preview stays muted
     }
 
-    // Manual unmute button: no preceding YES → allow sound
+    // Manual unmute button
     sAllowSound[ptr] = @YES;
     %orig;
 }
 
 %end
 
-// MutePreview.js AVR setVolume: — block if no preview player has allowSound=YES
+// MutePreview.js AVR: block volume if no preview player has allowSound=YES
 %hook AVSampleBufferAudioRenderer
 
 - (void)setVolume:(float)volume {
     if (volume <= 0.0f) { %orig; return; }
     if (!previewMuteEnabled && !blockPreviewEnabled) { %orig; return; }
-
     __block BOOL anyAllowed = NO;
     [sAllowSound enumerateKeysAndObjectsUsingBlock:^(NSString *k, NSNumber *v, BOOL *stop) {
         if ([v boolValue]) { anyAllowed = YES; *stop = YES; }
     }];
-    if (!anyAllowed) return; // block
+    if (!anyAllowed) return;
     %orig;
 }
 
@@ -252,13 +229,7 @@ static BOOL isPreviewPlayer(id player) {
 %end // Audio
 
 // ─── BlockPreview group ───────────────────────────────────────────────────────
-// BlockPreview.js logic:
-//   loadWithPlayerPlayback: → if isInlinePlaybackActive → drop call (block preview)
-//   loadWithPlayerTransition:playbackConfig:initialTime: → same guard
-//   resetWithStoppageReason: → clean up sAllowSound/sPrevWasMute1 for this player
-//
-// initialTime (CMTime, 32 bytes) is declared as void * to match ARM64 ABI
-// (large structs passed via hidden pointer — same root cause as the Frida crash).
+// BlockPreview.js: drop loadWithPlayerPlayback/Transition if isInlinePlaybackActive
 %group BlockPreview
 
 %hook YTLocalPlaybackController
@@ -272,21 +243,6 @@ static BOOL isPreviewPlayer(id player) {
 - (void)loadWithPlayerTransition:(id)transition playbackConfig:(id)config initialTime:(void *)time {
     if (!blockPreviewEnabled) { %orig; return; }
     if ([self isInlinePlaybackActive]) return;
-    %orig;
-}
-
-// Fires when a preview stops naturally (user scrolls away).
-// Clean up state so stale entries don't accumulate.
-// Note: keyed by YTLocalPlaybackController ptr here — this controller owns
-// the MLHAMQueuePlayer but we can't cheaply get its ptr, so we clean both
-// dicts with a prefix scan to remove any ptr that matches this controller.
-- (void)resetWithStoppageReason:(NSInteger)reason {
-    NSString *selfPtr = [NSString stringWithFormat:@"%p", self];
-    // Best-effort cleanup: remove the entry matching this controller's address.
-    // In practice YTLocalPlaybackController and its MLHAMQueuePlayer often share
-    // the same address region — if not, entries will be cleaned by the next mute cycle.
-    [sAllowSound   removeObjectForKey:selfPtr];
-    [sPrevWasMute1 removeObjectForKey:selfPtr];
     %orig;
 }
 
@@ -330,107 +286,6 @@ NSString *getCompactQualityLabel(MLFormat *format) {
 %end
 
 %end // Video
-
-// ─── Settings group ───────────────────────────────────────────────────────────
-%group Settings
-
-%hook YTSettingsViewController
-
-- (void)setSectionItems:(NSMutableArray *)sectionItems
-            forCategory:(NSInteger)category
-                  title:(NSString *)title
-                   icon:(id)icon
-       titleDescription:(NSString *)titleDescription
-           headerHidden:(BOOL)headerHidden {
-    %orig;
-    if (category != YouQualitySettingsCategory) return;
-
-    NSMutableArray *items = [NSMutableArray array];
-
-    YTSettingsSectionItem *blockItem = [%c(YTSettingsSectionItem)
-        switchItemWithTitle:@"Block Scroll Previews"
-        titleDescription:@"Prevent videos from auto-playing while scrolling the feed"
-        accessibilityIdentifier:nil
-        switchOn:blockPreviewEnabled
-        switchBlock:^BOOL(YTSettingsCell *cell, BOOL newValue) {
-            blockPreviewEnabled = newValue;
-            [[NSUserDefaults standardUserDefaults] setBool:newValue forKey:BlockPreviewKey];
-            return YES;
-        }
-        settingItemId:0];
-    [items addObject:blockItem];
-
-    YTSettingsSectionItem *muteItem = [%c(YTSettingsSectionItem)
-        switchItemWithTitle:@"Mute Scroll Previews"
-        titleDescription:@"Keep preview audio muted (vol buttons won't unmute them)"
-        accessibilityIdentifier:nil
-        switchOn:previewMuteEnabled
-        switchBlock:^BOOL(YTSettingsCell *cell, BOOL newValue) {
-            previewMuteEnabled = newValue;
-            [[NSUserDefaults standardUserDefaults] setBool:newValue forKey:PreviewMuteKey];
-            return YES;
-        }
-        settingItemId:0];
-    [items addObject:muteItem];
-
-    [self setSectionItems:items
-             forCategory:category
-                   title:@"YouQuality"
-                    icon:nil
-        titleDescription:nil
-            headerHidden:NO];
-}
-
-%end
-
-// Register our category with YouGroupSettings so it appears in the Tweaks group
-%hook YTSettingsGroupData
-
-+ (NSMutableArray <NSNumber *> *)tweaks {
-    NSMutableArray *tweaks = %orig;
-    if (tweaks && ![tweaks containsObject:@(YouQualitySettingsCategory)])
-        [tweaks addObject:@(YouQualitySettingsCategory)];
-    return tweaks;
-}
-
-%end
-
-// Fallback: if YouGroupSettings is absent, inject a standalone section
-%hook YTAppSettingsGroupPresentationData
-
-+ (NSArray *)orderedGroups {
-    NSArray *groups = %orig;
-    if ([%c(YTSettingsGroupData) respondsToSelector:@selector(tweaks)]) return groups;
-    @try {
-        NSMutableArray *mutable = [groups mutableCopy];
-        id group = [[%c(YTSettingsGroupData) alloc] initWithGroupType:YouQualitySettingsCategory];
-        [mutable insertObject:group atIndex:0];
-        return mutable;
-    } @catch (...) {}
-    return groups;
-}
-
-%end
-
-// Populate the section when the settings screen opens
-%hook YTSettingsSectionItemManager
-
-- (void)updateSectionForCategory:(NSInteger)category withEntry:(id)entry {
-    if (category != YouQualitySettingsCategory) { %orig; return; }
-    YTSettingsViewController *vc = [self valueForKey:@"_settingsViewControllerDelegate"];
-    if (vc) {
-        [vc setSectionItems:[NSMutableArray array]
-                forCategory:category
-                      title:@"YouQuality"
-                       icon:nil
-           titleDescription:nil
-               headerHidden:NO];
-    }
-}
-
-%end
-
-%end // Settings
 
 // ─── Top overlay ─────────────────────────────────────────────────────────────
 %group Top
@@ -571,7 +426,6 @@ NSString *getCompactQualityLabel(MLFormat *format) {
     %init(Audio);
     %init(BlockPreview);
     %init(Video);
-    %init(Settings);
     %init(Top);
     %init(Bottom);
 }
