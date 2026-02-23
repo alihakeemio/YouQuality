@@ -1,9 +1,8 @@
 "ENABLED" = "Show volume booster button";
 "POSITION" = "Volume booster position";
-"YouQualityVolBoost-PreviewMute" = "Keep preview muted";
-"YouQualityVolBoost-PreviewMute-DESC" = "Prevent volume buttons from unmuting home screen video previews";
 
-"YouQualityBlockPreview" = "Block scroll previews";
-"YouQualityBlockPreview-DESC" = "Prevent videos from auto-playing while scrolling the feed";
-"YouQualityPreviewMute" = "Mute scroll previews";
-"YouQualityPreviewMute-DESC" = "Keep preview audio muted (volume buttons will not unmute them)";
+"YouQualityVolBoost-BlockPreview" = "Block feed video previews";
+"YouQualityVolBoost-BlockPreview-DESC" = "Stop videos from auto-playing while scrolling the home feed";
+
+"YouQualityVolBoost-PreviewMute" = "Keep preview muted";
+"YouQualityVolBoost-PreviewMute-DESC" = "Prevent volume buttons from unmuting home screen previews (manual unmute still works)";
