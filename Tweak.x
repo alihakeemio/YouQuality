@@ -81,8 +81,6 @@ static NSString *gainLabel() {
 - (void)resetWithStoppageReason:(NSInteger)reason;
 @end
 
-@interface YTSettingsCell : UITableViewCell
-@end
 
 @interface YTMainAppControlsOverlayView (YouQuality)
 - (void)didPressYouQuality:(id)arg;
@@ -98,6 +96,10 @@ static NSString *gainLabel() {
 - (void)didPressVolBoost:(id)arg;
 - (void)handleVolBoostLongPress:(UILongPressGestureRecognizer *)gr;
 - (void)updateVolBoostButton;
+@end
+
+@interface YTSettingsGroupData : NSObject
+- (instancetype)initWithGroupType:(NSInteger)groupType;
 @end
 
 @interface YTSettingsGroupData (YouGroupSettings)
