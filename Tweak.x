@@ -4,19 +4,27 @@
 #import <AVFoundation/AVFoundation.h>
 #import <objc/runtime.h>
 
-#define TweakKey    @"YouQuality"
-#define VolBoostKey @"YouQualityVolBoost"
-#define GainKey     @"YouQualityVolBoost-Gain"
+#define TweakKey        @"YouQuality"
+#define VolBoostKey     @"YouQualityVolBoost"
+#define GainKey         @"YouQualityVolBoost-Gain"
+#define PreviewMuteKey  @"YouQualityVolBoost-PreviewMute"
 
-static void applyGainImmediately(); // forward declaration
-// ─── Gain state ───────────────────────────────────────────────────────────────
+static void applyGainImmediately();
+
+// ─── Settings ─────────────────────────────────────────────────────────────────
 static float currentGain = 1.0f;
+static BOOL previewMuteEnabled = YES;
 
 static float loadGain() {
     float g = [[NSUserDefaults standardUserDefaults] floatForKey:GainKey];
     if (g < 1.0f) g = 1.0f;
     if (g > 4.0f) g = 4.0f;
     return g;
+}
+
+static BOOL loadPreviewMute() {
+    NSNumber *val = [[NSUserDefaults standardUserDefaults] objectForKey:PreviewMuteKey];
+    return val ? [val boolValue] : YES; // default ON
 }
 
 static void saveGain(float gain) {
@@ -27,12 +35,11 @@ static void saveGain(float gain) {
     applyGainImmediately();
 }
 
-// Tap cycles: 100 -> 150 -> 200 -> 250 -> 300 -> 350 -> 400 -> 100
 static float nextGain(float gain) {
     static const float steps[] = {1.0f, 1.5f, 2.0f, 2.5f, 3.0f, 3.5f, 4.0f};
     for (int i = 0; i < 7; i++)
         if (gain < steps[i] - 0.01f) return steps[i];
-    return 1.0f; // wrap back to 100%
+    return 1.0f;
 }
 
 static NSString *gainLabel() {
@@ -40,15 +47,17 @@ static NSString *gainLabel() {
     return [NSString stringWithFormat:@"%d%%", pct];
 }
 
-// ─── HAMSBARAudioTrackRenderer interface ─────────────────────────────────────
-// Confirmed via Frida: _renderer ivar holds AVSampleBufferAudioRenderer
-// updateGainAndRendererVolume pushes final volume to _renderer after normalization
+// ─── Interfaces ───────────────────────────────────────────────────────────────
 @interface HAMSBARAudioTrackRenderer : NSObject
 @property (nonatomic, assign) float volume;
 - (void)updateGainAndRendererVolume;
 @end
 
-// ─── Forward declarations ─────────────────────────────────────────────────────
+@interface MLHAMQueuePlayer : NSObject
+- (BOOL)muted;
+- (void)setMuted:(BOOL)muted;
+@end
+
 @interface YTMainAppControlsOverlayView (YouQuality)
 - (void)didPressYouQuality:(id)arg;
 - (void)updateYouQualityButton:(id)arg;
@@ -76,51 +85,40 @@ static void setQualityButtonStyle(YTQTMButton *button) {
 
 static void updateVolBoostButtonLabel(YTQTMButton *button) {
     if (!button) return;
-
     button.titleLabel.numberOfLines = 1;
     button.titleLabel.textAlignment = NSTextAlignmentCenter;
-
-    // Auto-fit text like "100%" → "400%"
     button.titleLabel.adjustsFontSizeToFitWidth = YES;
     button.titleLabel.minimumScaleFactor = 0.7;
-
-    [button setTitle:gainLabel()
-            forState:UIControlStateNormal];
-
-    // Mic icon + current gain percentage
-    //[button setTitle:[NSString stringWithFormat:@"🎙\n%@", gainLabel()]
-    //        forState:UIControlStateNormal];
+    [button setTitle:gainLabel() forState:UIControlStateNormal];
 }
 
 static void attachLongPress(YTQTMButton *button, id target) {
     if (!button) return;
-    // Remove any existing long press recognizers to avoid duplicates
-    for (UIGestureRecognizer *gr in button.gestureRecognizers) {
+    for (UIGestureRecognizer *gr in button.gestureRecognizers)
         if ([gr isKindOfClass:[UILongPressGestureRecognizer class]])
             [button removeGestureRecognizer:gr];
-    }
     UILongPressGestureRecognizer *lp = [[UILongPressGestureRecognizer alloc]
         initWithTarget:target action:@selector(handleVolBoostLongPress:)];
     lp.minimumPressDuration = 0.6;
     [button addGestureRecognizer:lp];
 }
 
-// ─── Audio engine state ───────────────────────────────────────────────────────
-// Confirmed via Frida: hook updateGainAndRendererVolume, after %orig read
-// _renderer.volume (YouTube's normalized base), multiply by gain, set it back.
-// Store active instance + base so button press applies instantly without
-// needing pause/seek (mirrors the Frida script's applyGainNow logic exactly).
-
+// ─── Audio engine ─────────────────────────────────────────────────────────────
 static __weak HAMSBARAudioTrackRenderer *sActiveRenderer = nil;
 static float sBaseVolume = 1.0f;
 
 static void applyGainImmediately() {
     HAMSBARAudioTrackRenderer *renderer = sActiveRenderer;
     if (!renderer) return;
-    // Re-trigger YouTube's own normalization calculation, then our hook
-    // will multiply the result by currentGain — exactly like the Frida script.
     [renderer updateGainAndRendererVolume];
 }
+
+// ─── Preview mute state ───────────────────────────────────────────────────────
+// Confirmed via Frida: volume button during home screen preview calls
+// MLHAMQueuePlayer setMuted:0 (unmute) even though preview should stay muted.
+// We track mute state and block the unmute at both MLHAMQueuePlayer and
+// AVSampleBufferAudioRenderer level to be sure.
+static BOOL sPlayerIsMuted = NO;
 
 %group Audio
 
@@ -128,19 +126,42 @@ static void applyGainImmediately() {
 
 - (void)updateGainAndRendererVolume {
     %orig;
-
-    // Assign to id first — ARC allows implicit id → specific class conversion,
-    // no __bridge or cast syntax needed, compiles cleanly in plain ObjC.
     Ivar ivar = class_getInstanceVariable([self class], "_renderer");
     if (!ivar) return;
     id rendererObj = object_getIvar(self, ivar);
     if (!rendererObj) return;
     AVSampleBufferAudioRenderer *r = rendererObj;
-
     sActiveRenderer = self;
     sBaseVolume = r.volume;
     if (currentGain > 1.0f)
         r.volume = sBaseVolume * currentGain;
+}
+
+%end
+
+%hook MLHAMQueuePlayer
+
+- (void)setMuted:(BOOL)muted {
+    if (muted) {
+        sPlayerIsMuted = YES;
+    } else if (previewMuteEnabled && sPlayerIsMuted) {
+        // Block unmute triggered by volume buttons during preview
+        return;
+    } else {
+        sPlayerIsMuted = NO;
+    }
+    %orig;
+}
+
+%end
+
+%hook AVSampleBufferAudioRenderer
+
+- (void)setVolume:(float)volume {
+    // Secondary block: if player is muted, don't let anything set volume > 0
+    if (previewMuteEnabled && sPlayerIsMuted && volume > 0)
+        return;
+    %orig;
 }
 
 %end
@@ -303,6 +324,7 @@ NSString *getCompactQualityLabel(MLFormat *format) {
 // ─── Constructor ─────────────────────────────────────────────────────────────
 %ctor {
     currentGain = loadGain();
+    previewMuteEnabled = loadPreviewMute();
     initYTVideoOverlay(TweakKey, @{
         AccessibilityLabelKey: @"Quality",
         SelectorKey: @"didPressYouQuality:",
