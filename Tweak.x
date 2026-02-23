@@ -4,18 +4,16 @@
 #import <AVFoundation/AVFoundation.h>
 #import <objc/runtime.h>
 
-#define TweakKey            @"YouQuality"
-#define VolBoostKey         @"YouQualityVolBoost"
-#define GainKey             @"YouQualityVolBoost-Gain"
-#define PreviewMuteKey      @"YouQualityVolBoost-PreviewMute"
-#define BlockPreviewKey     @"YouQualityBlockPreview"
+#define TweakKey        @"YouQuality"
+#define VolBoostKey     @"YouQualityVolBoost"
+#define GainKey         @"YouQualityVolBoost-Gain"
+#define PreviewMuteKey  @"YouQualityVolBoost-PreviewMute"
 
 static void applyGainImmediately();
 
 // ─── Settings ─────────────────────────────────────────────────────────────────
-static float currentGain        = 1.0f;
-static BOOL previewMuteEnabled  = NO;   // default OFF
-static BOOL blockPreviewEnabled = YES;  // default ON
+static float currentGain = 1.0f;
+static BOOL previewMuteEnabled = YES;
 
 static float loadGain() {
     float g = [[NSUserDefaults standardUserDefaults] floatForKey:GainKey];
@@ -26,11 +24,6 @@ static float loadGain() {
 
 static BOOL loadPreviewMute() {
     NSNumber *val = [[NSUserDefaults standardUserDefaults] objectForKey:PreviewMuteKey];
-    return val ? [val boolValue] : NO; // default OFF
-}
-
-static BOOL loadBlockPreview() {
-    NSNumber *val = [[NSUserDefaults standardUserDefaults] objectForKey:BlockPreviewKey];
     return val ? [val boolValue] : YES; // default ON
 }
 
@@ -63,13 +56,6 @@ static NSString *gainLabel() {
 @interface MLHAMQueuePlayer : NSObject
 - (BOOL)muted;
 - (void)setMuted:(BOOL)muted;
-@end
-
-@interface YTLocalPlaybackController : NSObject
-- (BOOL)isInlinePlaybackActive;
-- (void)loadWithPlayerPlayback:(id)playback;
-// CMTime (32 bytes) passed via hidden pointer on ARM64 — declared as void *
-- (void)loadWithPlayerTransition:(id)transition playbackConfig:(id)config initialTime:(void *)time;
 @end
 
 @interface YTMainAppControlsOverlayView (YouQuality)
@@ -128,29 +114,16 @@ static void applyGainImmediately() {
 }
 
 // ─── Preview mute state ───────────────────────────────────────────────────────
-// MutePreview: track per-player allow/mute state.
-// sAllowSound keyed by MLHAMQueuePlayer ptr — YES means user manually unmuted.
-// sPrevWasMute1 — YES means last setMuted: call was YES (detects vol button pattern).
-static NSMutableDictionary<NSString *, NSNumber *> *sAllowSound   = nil;
-static NSMutableDictionary<NSString *, NSNumber *> *sPrevWasMute1 = nil;
+// Confirmed via Frida: volume button during home screen preview calls
+// MLHAMQueuePlayer setMuted:0 (unmute) even though preview should stay muted.
+// We track mute state and block the unmute at both MLHAMQueuePlayer and
+// AVSampleBufferAudioRenderer level to be sure.
+static BOOL sPlayerIsMuted = NO;
 
-// isPreview: mirrors MutePreview.js isPreview() — checks _stickySettings ivar.
-// Preview players have nil stickySettings; real players have it set.
-static BOOL isPreviewPlayer(id player) {
-    @try {
-        Ivar ivar = class_getInstanceVariable([player class], "_stickySettings");
-        if (!ivar) return YES;
-        id sticky = object_getIvar(player, ivar);
-        return !sticky || (NSNull *)sticky == [NSNull null];
-    } @catch (...) { return YES; }
-}
-
-// ─── Audio group ──────────────────────────────────────────────────────────────
 %group Audio
 
 %hook HAMSBARAudioTrackRenderer
 
-// Existing vol boost — unchanged
 - (void)updateGainAndRendererVolume {
     %orig;
     Ivar ivar = class_getInstanceVariable([self class], "_renderer");
@@ -164,93 +137,38 @@ static BOOL isPreviewPlayer(id player) {
         r.volume = sBaseVolume * currentGain;
 }
 
-// MutePreview.js: always block HAM setVolume for preview players.
-// _audioDelegate ivar points to the owning MLHAMQueuePlayer.
-- (void)setVolume:(float)volume {
-    if (!previewMuteEnabled || volume <= 0.0f) { %orig; return; }
-    @try {
-        Ivar ivar = class_getInstanceVariable([self class], "_audioDelegate");
-        if (!ivar) { %orig; return; }
-        id delegate = object_getIvar(self, ivar);
-        if (!delegate) { %orig; return; }
-        if (!isPreviewPlayer(delegate)) { %orig; return; }
-        return; // block HAM volume for previews — AVR is the real gate
-    } @catch (...) { %orig; }
-}
-
 %end
 
-// MutePreview.js setMuted: pattern:
-//   YES  → system muted → mark prevWasMute1=YES, allowSound=NO
-//   NO after YES → vol button → block (don't call %orig)
-//   NO with no prior YES → manual unmute button → allowSound=YES
 %hook MLHAMQueuePlayer
 
 - (void)setMuted:(BOOL)muted {
-    if (!previewMuteEnabled || !isPreviewPlayer(self)) { %orig; return; }
-
-    NSString *ptr = [NSString stringWithFormat:@"%p", self];
-
     if (muted) {
-        sPrevWasMute1[ptr] = @YES;
-        sAllowSound[ptr]   = @NO;
-        %orig;
+        sPlayerIsMuted = YES;
+    } else if (previewMuteEnabled && sPlayerIsMuted) {
+        // Block unmute triggered by volume buttons during preview
         return;
+    } else {
+        sPlayerIsMuted = NO;
     }
-
-    if ([sPrevWasMute1[ptr] boolValue]) {
-        sPrevWasMute1[ptr] = @NO;
-        return; // vol button — block unmute, preview stays muted
-    }
-
-    // Manual unmute button
-    sAllowSound[ptr] = @YES;
     %orig;
 }
 
 %end
 
-// MutePreview.js AVR: block volume if no preview player has allowSound=YES
 %hook AVSampleBufferAudioRenderer
 
 - (void)setVolume:(float)volume {
-    if (volume <= 0.0f) { %orig; return; }
-    if (!previewMuteEnabled && !blockPreviewEnabled) { %orig; return; }
-    __block BOOL anyAllowed = NO;
-    [sAllowSound enumerateKeysAndObjectsUsingBlock:^(NSString *k, NSNumber *v, BOOL *stop) {
-        if ([v boolValue]) { anyAllowed = YES; *stop = YES; }
-    }];
-    if (!anyAllowed) return;
+    // Secondary block: if player is muted, don't let anything set volume > 0
+    if (previewMuteEnabled && sPlayerIsMuted && volume > 0)
+        return;
     %orig;
 }
 
 %end
 
-%end // Audio
-
-// ─── BlockPreview group ───────────────────────────────────────────────────────
-// BlockPreview.js: drop loadWithPlayerPlayback/Transition if isInlinePlaybackActive
-%group BlockPreview
-
-%hook YTLocalPlaybackController
-
-- (void)loadWithPlayerPlayback:(id)playback {
-    if (!blockPreviewEnabled) { %orig; return; }
-    if ([self isInlinePlaybackActive]) return;
-    %orig;
-}
-
-- (void)loadWithPlayerTransition:(id)transition playbackConfig:(id)config initialTime:(void *)time {
-    if (!blockPreviewEnabled) { %orig; return; }
-    if ([self isInlinePlaybackActive]) return;
-    %orig;
-}
-
 %end
 
-%end // BlockPreview
-
-// ─── Video group ──────────────────────────────────────────────────────────────
+// ─── Video group ─────────────────────────────────────────────────────────────
 %group Video
 
 NSString *getCompactQualityLabel(MLFormat *format) {
@@ -285,7 +203,7 @@ NSString *getCompactQualityLabel(MLFormat *format) {
 }
 %end
 
-%end // Video
+%end
 
 // ─── Top overlay ─────────────────────────────────────────────────────────────
 %group Top
@@ -347,7 +265,7 @@ NSString *getCompactQualityLabel(MLFormat *format) {
 
 %end
 
-%end // Top
+%end
 
 // ─── Bottom overlay ───────────────────────────────────────────────────────────
 %group Bottom
@@ -401,17 +319,12 @@ NSString *getCompactQualityLabel(MLFormat *format) {
 
 %end
 
-%end // Bottom
+%end
 
 // ─── Constructor ─────────────────────────────────────────────────────────────
 %ctor {
-    sAllowSound   = [NSMutableDictionary new];
-    sPrevWasMute1 = [NSMutableDictionary new];
-
-    currentGain         = loadGain();
-    previewMuteEnabled  = loadPreviewMute();
-    blockPreviewEnabled = loadBlockPreview();
-
+    currentGain = loadGain();
+    previewMuteEnabled = loadPreviewMute();
     initYTVideoOverlay(TweakKey, @{
         AccessibilityLabelKey: @"Quality",
         SelectorKey: @"didPressYouQuality:",
@@ -422,9 +335,7 @@ NSString *getCompactQualityLabel(MLFormat *format) {
         SelectorKey: @"didPressVolBoost:",
         AsTextKey: @YES
     });
-
     %init(Audio);
-    %init(BlockPreview);
     %init(Video);
     %init(Top);
     %init(Bottom);
