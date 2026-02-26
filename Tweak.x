@@ -15,22 +15,22 @@ static float currentGain = 1.0f;
 static float loadGain() {
     float g = [[NSUserDefaults standardUserDefaults] floatForKey:GainKey];
     if (g < 1.0f) g = 1.0f;
-    if (g > 4.0f) g = 4.0f;
+    if (g > 8.0f) g = 8.0f;
     return g;
 }
 
 static void saveGain(float gain) {
     if (gain < 1.0f) gain = 1.0f;
-    if (gain > 4.0f) gain = 4.0f;
+    if (gain > 8.0f) gain = 8.0f;
     currentGain = gain;
     [[NSUserDefaults standardUserDefaults] setFloat:gain forKey:GainKey];
     applyGainImmediately();
 }
 
-// Tap cycles: 100 -> 150 -> 200 -> 250 -> 300 -> 350 -> 400 -> 100
+// Tap cycles: 100 -> 200 -> 300 -> 400 -> 500 -> 600 -> 700 -> 800 -> 100
 static float nextGain(float gain) {
-    static const float steps[] = {1.0f, 1.5f, 2.0f, 2.5f, 3.0f, 3.5f, 4.0f};
-    for (int i = 0; i < 7; i++)
+    static const float steps[] = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f, 8.0f};
+    for (int i = 0; i < 8; i++)
         if (gain < steps[i] - 0.01f) return steps[i];
     return 1.0f; // wrap back to 100%
 }
@@ -80,16 +80,12 @@ static void updateVolBoostButtonLabel(YTQTMButton *button) {
     button.titleLabel.numberOfLines = 1;
     button.titleLabel.textAlignment = NSTextAlignmentCenter;
 
-    // Auto-fit text like "100%" → "400%"
+    // Auto-fit text like "100%" → "800%"
     button.titleLabel.adjustsFontSizeToFitWidth = YES;
     button.titleLabel.minimumScaleFactor = 0.7;
 
     [button setTitle:gainLabel()
             forState:UIControlStateNormal];
-
-    // Mic icon + current gain percentage
-    //[button setTitle:[NSString stringWithFormat:@"🎙\n%@", gainLabel()]
-    //        forState:UIControlStateNormal];
 }
 
 static void attachLongPress(YTQTMButton *button, id target) {
